@@ -1,0 +1,6 @@
+# 依赖与本地产物不进版本库
+node_modules/
+*.log
+
+# DSH 运行时会往插件目录写缓存/派生图
+tools/out/

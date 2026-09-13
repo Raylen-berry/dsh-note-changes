@@ -1,0 +1,17 @@
+# ============================================================================
+# dsh-note-changes —— DSH bundle patch
+# ============================================================================
+# 这是插件的"挂载声明"。DSH 启动时按 bundle 层栈叠加各插件 patch,
+# 本文件把插件插入 Web profile 的配置树, 使其作为标准 DSH 插件
+# 随启动自动加载、重启保留、可在设置 → 插件里开启/关闭。
+#
+# 安装方式 (无需手工复制/改 profile patch):
+#   dsh plugin --profile web add link:<本目录绝对路径>     # 本地开发安装
+#   或发布到仓库后用:
+#   dsh plugin --profile web add github:<owner>/<repo>#<ref>
+# 装完必须重启 DSH Desktop: client 半在启动时 compose, 刷新页面不够。
+# ============================================================================
+
+- insert:
+    - id: note-changes
+      name: dsh-note-changes
