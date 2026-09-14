@@ -34,6 +34,22 @@ dsh plugin --profile web add link:E:\deepseekagent\dsh-note-changes-main
 > **必须重启**，刷新网页不够：本插件的 Client 半在 DSH 启动时与其它插件一起 compose。
 > （只改 client 半时也能靠 `/plugins` 路由的内容哈希热更，但有约 7 秒防抖重扫；Host 半一律要重启。）
 
+### 再告诉插件你的 vault 在哪（三选一，v1.5.0）
+
+```powershell
+# ① 指针文件（推荐：不进 git，一台机器一份，重启后所有选路都自愈）
+"> E:/my-vault" | Out-File "$env:APPDATA\dsh-desktop\harness\dsh-note-changes\vault.txt" -Encoding utf8NoBOM
+
+# ② 环境变量（桌面版 App 未必继承终端里的设置，优先用 ①）
+[Environment]::SetEnvironmentVariable('DNC_VAULT','E:/my-vault','User')
+
+# ③ 图形界面：设置 → 笔记改动 → 填路径点「应用」
+#    这是「本浏览器的显式覆盖」，优先级最高；点「跟随本机引导」可清掉。
+```
+
+上表 ①② 的机器本地引导**压过** vault 里那个随 git 同步过来的 `vault:` 值，
+所以从别的机器 clone 过来的库不会把本机路径盖回上一个机器的地址。
+
 ## 它做了什么
 
 Host 半跑一条只读命令并把结果整理成 JSON：
@@ -124,10 +140,26 @@ git config --global --add safe.directory <vault 路径>
 
 **用提权（管理员）创建的目录一定会中这一条**——属主会变成 `BUILTIN\Administrators`。建目录尽量别提权。
 
-## 配置：存在 vault 里，随 git 走
+## 配置：开关在 vault 里随 git 走，**路径是本机的**
 
-vault 路径与两个开关都在 **vault 自己的 `00-索引/插件设置.md` 的 frontmatter** 里
-（不再存浏览器 `localStorage` —— 那只在本机有效，换机器就丢）：
+两个开关（`scanVault` / `autoWriteOnSessionEnd`）存在 **vault 自己的 `00-索引/插件设置.md` 的 frontmatter** 里，
+随 git 同步到每台设备。但 **`vault` 这个键不能跟着走**——它是机器专属绝对路径：
+在 E 盘上写成 `E:/vault`，clone 到只有 D 盘的机器上就指错了。而"读这个键"本身又要先知道 vault 在哪，
+于是形成死循环（v1.4.1 的实际症状：换机器后抽屉空白，且 `vault_note_append` / idle 兜底
+只按内置默认值去找设置文件 ⇒ AI 侧写入选路同样是死的）。
+
+v1.5.0 给了一条**不依赖 vault** 的引导，按优先级取第一个非空且合法的：
+
+| 优先级 | 来源 | 说明 |
+| --- | --- | --- |
+| 1 | `?vault=` / `vault_note_append` 的 `vault` 参数 | 显式覆盖，最大 |
+| 2 | 环境变量 `DNC_VAULT` | 注意桌面版 App 不一定继承你在终端里设的变量，优先用下一行 |
+| 3 | **指针文件 `$DSH_HOME/dsh-note-changes/vault.txt`** | 一行的绝对路径，允许 `#` 注释；**不进 git**，换机器只写这一个文件 |
+| 4 | vault 里的 `vault:` 键 | 仅当上面三档都没表态时才采纳 |
+| 5 | 内置默认 `E:/vault` | 兜底 |
+
+设置页里那个输入框是 **本浏览器的显式覆盖**（存 `localStorage`），填了就是第 1 档；
+点「跟随本机引导」清掉它，就又回到由指针文件/环境变量决定的状态。
 
 | 键 | 含义 | 默认 |
 | --- | --- | --- |
@@ -135,9 +167,11 @@ vault 路径与两个开关都在 **vault 自己的 `00-索引/插件设置.md` 
 | `scanVault` | 出错时优先查本库的关键词索引（抽屉的「相关笔记」把 [[关键词索引]] 钉在第一位） | `true` |
 | `autoWriteOnSessionEnd` | 控制**所有**往本库写入的行为，关掉则一条都不写 | `true` |
 
-路径用正斜杠（`E:/vault`）——Windows 下 git 与 Node 都接受，还能避免反斜杠在 JS 字符串里的转义问题。
+路径用正斜杠（`E:/vault`）——Windows 下 git 与 Node 都接受，还能避免反斜杠在 JS 字符串里的转义问题
+（反斜杠也收，插件自己会归一化；相对路径一律判为无效，因为它跟着 cwd 走会指到别的库）。
 
 改法：直接改 frontmatter（Obsidian 的「属性」面板也能改），或者在插件设置页 / 输入框 chip 里点开关 —— 写的是同一处。
+设置页下方会显示**当前生效路径与它的依据**（是第几档选的），不用再靠猜。
 
 ## 已知限制
 
@@ -155,17 +189,26 @@ vault 路径与两个开关都在 **vault 自己的 `00-索引/插件设置.md` 
 | 面板里显示「这个仓库还没有提交」 | vault 可能没 `git init`，或路径填错了 |
 | 显示 `Host 未提供 shell 服务` | 该 profile 没有 `shell` 服务 |
 | 开关点了没反应 | 组件是否漏了 `useVersion()` 订阅（见上面「取舍 4」） |
+| 换机器后抽屉空白 / 工具报「解析不出 vault 路径」 | 第 1 档没给路径：写指针文件或设 `DNC_VAULT`（见「安装 · 再告诉插件你的 vault 在哪」）；vault 里那个 `vault:` 是从别的机器同步来的，多半还指着上一台的路径 |
 | 所有会话都报 400 / 工具全挂 | `vault_note_append` 的 schema 是否被改成了非标准形状（见下面 v1.4.1） |
 
 ## 版本
 
 完整历史见 `git log`；下面只记**行为会变**的节点。
 
+- **v1.5.0**：解掉「vault 路径」的鸡生蛋死循环。新增机器本地引导 —— 环境变量 `DNC_VAULT` 与
+  指针文件 `$DSH_HOME/dsh-note-changes/vault.txt`，五档优先级（显式 > env > 指针 > vault 里的 `vault:` > 内置默认），
+  且机器本地三档**压过** git 同步来的路径（否则换机又被上一台盖回去）。三条路由 + 工具 + idle 兜底
+  统一走同一个 `resolveVault()`，响应带 `vaultSource`/`vaultPath`，设置页直接显示"当前生效路径与依据"。
+  client 半改为**没显式覆盖就不发 `?vault=`**（v1.4.1 在 localStorage 为空时硬发 `E:/vault`，
+  正好把 host 的引导盖死 —— 这就是"新机器抽屉空白"的真因）；新增「跟随本机引导」按钮。
+  另修 `shortSession()`：DSH 会话 id 形如 `session-<uuid>`，取前 8 位得到的是无信息量的 `session-`，
+  兜底存根因此认不出是哪个会话；现在先剥前缀再截。
 - **v1.4.1**：修 `vault_note_append` 的工具 schema。原先是扁平 `parameters`（属性里带 `required: true`），
   而 DeepSeek 对工具 schema 是**严格校验**、`tools` 数组又挂在**每一个**请求上 ⇒ 一个畸形 schema 不是"这个工具不能用"，
   而是所有会话每条消息都 400。改成标准 JSON Schema（`type: 'object'` + 顶层 `required`）后恢复。
   **教训**：在宽容的 provider 上验证通过 ≠ schema 合法。
-- **v1.4.0**：设置搬进 vault 的 `00-索引/插件设置.md`（随 git 迁移，换机零配置）；输入框右侧新增 chip。
+- **v1.4.0**：设置搬进 vault 的 `00-索引/插件设置.md`（**开关**随 git 迁移；**路径**不能，见 v1.5.0）；输入框右侧新增 chip。
 - **v1.3.0**：会话转 `idle` 后的兜底存根（3 分钟防抖 + 三个条件同时成立才写）。
 - **v1.2.0**：接入 `vault_note_append` 工具（AI 按 `AGENTS.md` §7 收工前主动写要点）。
 - **v1.1.0**：改用 DSH 原生 UI 组件 + 自命名空间 CSS；Host 半补 `inject` 声明。

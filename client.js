@@ -182,16 +182,24 @@ window.__ModuleLoader__.load({
       return String(error)
     }
 
+    // v1.5.0：这里**不再**退到 DEFAULT_VAULT。旧写法在 localStorage 为空时返回
+    // 'E:/vault'，于是每个请求都硬发 ?vault=E:/vault，把 host 侧的机器本地引导
+    // （DNC_VAULT / 指针文件）直接盖掉 —— 新机器上抽屉因此永远空白。
+    // 现在留空 = 「本机没覆盖，交给 host 按优先级裁决」。
     function loadVault() {
       try {
         var saved = window.localStorage.getItem(STORE_KEY)
         if (saved && String(saved).trim().length > 0) return String(saved).trim()
-      } catch (err) { /* localStorage 不可用就用默认值 */ }
-      return DEFAULT_VAULT
+      } catch (err) { /* localStorage 不可用 = 没有本机覆盖 */ }
+      return ''
     }
 
     function saveVault(value) {
-      try { window.localStorage.setItem(STORE_KEY, value) } catch (err) { /* 忽略 */ }
+      var v = typeof value === 'string' ? value.trim() : ''
+      try {
+        if (v.length > 0) window.localStorage.setItem(STORE_KEY, v)
+        else window.localStorage.removeItem(STORE_KEY)
+      } catch (err) { /* 忽略 */ }
     }
 
     // 面板自定义位置（拖动后记住）。null = 默认：靠右 + 上下居中。
@@ -424,7 +432,10 @@ window.__ModuleLoader__.load({
       }
 
       var store = {
-        vault: loadVault(),
+        override: loadVault(),          // 用户显式输入过的路径；'' = 跟随 host 引导
+        vault: loadVault(),             // 当前生效路径（host 返回后刷新），只用于显示
+        vaultSource: '',                // host 依据哪一档选的：explicit/env/pointer/vaultFile/default
+        vaultPath: '',                  // host 实际用的那个路径
         version: 0,
         subs: [],
         settings: { scanVault: true, autoWriteOnSessionEnd: true },
@@ -446,31 +457,59 @@ window.__ModuleLoader__.load({
           if (index >= 0) store.subs.splice(index, 1)
         }
       }
-      function setVault(next) {
-        var value = (typeof next === 'string' && next.trim().length > 0) ? next.trim() : DEFAULT_VAULT
-        store.vault = value
+      /**
+       * 只有用户显式覆盖过才带 ?vault=。不带 = 让 host 按
+       * 环境变量 / 指针文件 / 设置文件 / 默认值 的梯子自己裁决 —— 这是换机器能自愈的关键。
+       */
+      function withQuery(path, extra) {
+        var parts = []
+        if (store.override.length > 0) parts.push('vault=' + encodeURIComponent(store.override))
+        if (extra) parts.push(extra)
+        return parts.length > 0 ? path + '?' + parts.join('&') : path
+      }
+
+      var SOURCE_LABELS = {
+        explicit: '设置页里的本机覆盖',
+        env: '环境变量 DNC_VAULT',
+        pointer: '指针文件 dsh-note-changes/vault.txt',
+        vaultFile: 'vault 里的 00-索引/插件设置.md',
+        default: '插件内置默认值',
+        none: '没解析出任何路径',
+      }
+
+      function setVault(next, followHost) {
+        var value = followHost ? '' : (typeof next === 'string' ? next.trim() : '')
+        store.override = value
+        store.vault = value.length > 0 ? value : ''
         saveVault(value)
         bump()
       }
 
       // ---- 设置：真正的源是 vault 里的 00-索引/插件设置.md（随 git 迁移）----
-      // localStorage 只做首屏兜底：刚打开时先用上次的值渲染，随后被文件里的值覆盖。
+      // host 返回的 vault 只更新「显示用的生效值」，**不**写回 localStorage ——
+      // 写回去就变成永久本机覆盖，指针文件/环境变量以后改了也追不上（v1.4.1 就是这么把
+      // host 的引导盖死的）。想固定一个路径请在设置页点「应用」，那才是显式覆盖。
       function applySettings(next) {
         if (!next) { bump(); return }
         if (typeof next.scanVault === 'boolean') store.settings.scanVault = next.scanVault
         if (typeof next.autoWriteOnSessionEnd === 'boolean') {
           store.settings.autoWriteOnSessionEnd = next.autoWriteOnSessionEnd
         }
-        if (typeof next.vault === 'string' && next.vault.trim().length > 0 && next.vault.trim() !== store.vault) {
+        if (store.override.length === 0 && typeof next.vault === 'string' && next.vault.trim().length > 0) {
           store.vault = next.vault.trim()
-          saveVault(store.vault)
         }
         bump()
       }
 
+      /** host 这次是按哪一档选的，显示出来，免得「为什么是这个路径」只能靠猜。 */
+      function captureSource(body) {
+        store.vaultSource = String((body && body.vaultSource) || '')
+        store.vaultPath = String((body && body.vaultPath) || '')
+      }
+
       function loadSettings() {
         store.settingsPhase = 'loading'
-        fetch(SETTINGS_PATH + '?vault=' + encodeURIComponent(store.vault), {
+        fetch(withQuery(SETTINGS_PATH), {
           headers: { accept: 'application/json' },
         })
           .then(function (response) { return response.text() })
@@ -482,6 +521,7 @@ window.__ModuleLoader__.load({
               store.settingsError = ''
               store.settingsSource = String(body.source || '')
               store.settingsExists = body.exists !== false
+              captureSource(body)
               applySettings(body.settings)
             } else {
               store.settingsPhase = 'error'
@@ -499,7 +539,7 @@ window.__ModuleLoader__.load({
       function saveSettings(patch) {
         store.settingsPhase = 'saving'
         bump()
-        fetch(SETTINGS_PATH + '?vault=' + encodeURIComponent(store.vault), {
+        fetch(withQuery(SETTINGS_PATH), {
           method: 'POST',
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           body: JSON.stringify({ patch: patch }),
@@ -511,6 +551,7 @@ window.__ModuleLoader__.load({
             if (body && body.ok && body.settings) {
               store.settingsPhase = 'ready'
               store.settingsError = ''
+              captureSource(body)
               applySettings(body.settings)
             } else {
               store.settingsPhase = 'error'
@@ -543,7 +584,7 @@ window.__ModuleLoader__.load({
           var alive = true
           setState({ phase: 'loading', commits: [], error: '', vault: store.vault })
 
-          fetch(LOG_PATH + '?vault=' + encodeURIComponent(store.vault), {
+          fetch(withQuery(LOG_PATH), {
             headers: { accept: 'application/json' },
           })
             .then(function (response) {
@@ -603,7 +644,7 @@ window.__ModuleLoader__.load({
           if (!enabled || !path) { setState({ phase: 'idle', text: '', error: '', truncated: false }); return }
           var alive = true
           setState({ phase: 'loading', text: '', error: '', truncated: false })
-          fetch(NOTE_PATH + '?vault=' + encodeURIComponent(store.vault) + '&path=' + encodeURIComponent(path), {
+          fetch(withQuery(NOTE_PATH, 'path=' + encodeURIComponent(path)), {
             headers: { accept: 'application/json' },
           })
             .then(function (response) {
@@ -1049,15 +1090,26 @@ window.__ModuleLoader__.load({
             + '输入框右侧的「笔记」chip 是同一组开关的快捷入口。'),
           h('div', { className: 'dnc-label' }, 'vault 路径'),
           h('div', { className: 'dnc-field' }, h(VaultInput, {
-            value: draft, placeholder: DEFAULT_VAULT,
+            value: draft, placeholder: store.vaultPath || DEFAULT_VAULT,
             onChange: function (event) { setDraft(event.target.value) },
           })),
+          h('p', { className: 'dnc-p' },
+            '留空 = 跟随本机引导。当前生效：',
+            h('code', { className: 'dnc-code' }, store.vaultPath || store.vault || '（未解析）'),
+            store.vaultSource ? h('span', null, ' · 依据：' + (SOURCE_LABELS[store.vaultSource] || store.vaultSource)) : null,
+            h('br', null),
+            '换机器只需在 ', h('code', { className: 'dnc-code' }, '$DSH_HOME/dsh-note-changes/vault.txt'),
+            ' 里写一行本机路径（或设环境变量 DNC_VAULT），不必在这儿填；这里填了则是本浏览器的显式覆盖，优先级最高。'),
           h(ToggleRows, { compact: false }),
           h('div', { className: 'dnc-bar' },
             h(ActionButton, {
-              variant: 'primary', size: 'sm', title: '保存并重新读取',
+              variant: 'primary', size: 'sm', title: '把这个路径设成本浏览器的显式覆盖，并重新读取',
               onClick: function () { setVault(draft) },
             }, '应用'),
+            h(ActionButton, {
+              variant: 'ghost', size: 'sm', title: '清掉本机覆盖，改由环境变量 / 指针文件 / 设置文件决定',
+              onClick: function () { setVault('', true); setDraft('') },
+            }, '跟随本机引导'),
             h(ReloadButton, null)
           ),
           h(Timeline, null)

@@ -17,6 +17,8 @@
 //   修法：git config --global --add safe.directory <vault 路径>
 // ============================================================================
 
+import { existsSync, readFileSync } from 'node:fs'
+
 export const name = 'dsh-note-changes'
 
 // Cordis 的服务是异步出现的。不声明 inject，apply 会在 webServer 就绪之前
@@ -47,6 +49,70 @@ const DEFAULT_SETTINGS = {
   vault: DEFAULT_VAULT,
   scanVault: true,
   autoWriteOnSessionEnd: true,
+}
+
+// ---- 机器本地引导（v1.5.0）-------------------------------------------------
+// 为什么非要有这一段：`vault:` 这个键存在 vault 里，而「读 vault 里那个键」必须
+// 先知道 vault 在哪。换到新机器上 DEFAULT_VAULT 指向一个不存在的路径 ⇒ 名片寄丢
+// 了没人看，「设置随 git 迁移」在这一环是死循环：抽屉空白，AI 侧的写入选路
+// （vault_note_append / idle 兜底）同样读不到设置，只能靠调用时显式传 vault。
+// 解法是给一条**不依赖 vault** 的引导：环境变量 DNC_VAULT，或指针文件
+//   $DSH_HOME/dsh-note-changes/vault.txt（本机几十字节，不进 git）。
+// 优先级（越靠前越大）。机器本地三档**压过** vault 里的 git 值，否则换机又被上一台盖回去：
+//   1 explicit（?vault= / args.vault） 2 env（DNC_VAULT） 3 pointer（指针文件）
+//   4 vaultFile（vault 里的 vault:）   5 default（DEFAULT_VAULT）
+const ENV_VAULT_KEY = 'DNC_VAULT'
+const POINTER_REL = 'dsh-note-changes/vault.txt'
+
+/** 归一化 vault 路径：反斜杠→正斜杠、去尾斜杠；不是绝对路径返回空串（视为无效）。 */
+export function normalizeVaultPath(raw) {
+  let s = String(raw == null ? '' : raw).trim().replace(/\\/g, '/')
+  s = s.replace(/\/+$/, '')
+  if (s.length === 0) return ''
+  if (/^[A-Za-z]:\/.+/.test(s)) return s // Windows 盘符绝对路径
+  if (s.indexOf('/') === 0 && s.length > 1) return s // POSIX 绝对路径
+  return '' // 相对路径一律不收：它跟着 cwd 走，会指到别的库
+}
+
+/** 指针文件内容：第一条非注释非空的行 = 路径，其余忽略。坏内容 ⇒ 空串（当没写过）。 */
+export function parsePointerFile(text) {
+  const lines = String(text || '').split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim()
+    if (t.length === 0 || t.charAt(0) === '#') continue
+    return normalizeVaultPath(t)
+  }
+  return ''
+}
+
+/** 纯函数版优先级裁决 —— 不碰 IO，所以能在离线夹具里逐档验。 */
+export function pickVaultSeed(sources) {
+  const src = sources || {}
+  const ladder = [
+    ['explicit', src.explicit],
+    ['env', src.env],
+    ['pointer', src.pointer],
+    ['vaultFile', src.vaultFile],
+    ['default', src.fallback],
+  ]
+  for (let i = 0; i < ladder.length; i++) {
+    const normalized = normalizeVaultPath(ladder[i][1])
+    if (normalized.length > 0) return { vault: normalized, source: ladder[i][0] }
+  }
+  return { vault: '', source: 'none' }
+}
+
+/** $DSH_HOME，退到 %APPDATA%/dsh-desktop/harness（与宿主其它插件同口径）。 */
+export function guessDshHome(env) {
+  const e = env || {}
+  const direct = normalizePath(String(e.DSH_HOME || ''))
+  if (direct.length > 0) return direct
+  const appdata = normalizePath(String(e.APPDATA || ''))
+  return appdata.length > 0 ? appdata + '/dsh-desktop/harness' : ''
+
+  function normalizePath(value) {
+    return String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  }
 }
 
 /** 只认 frontmatter 里的单行 `key: value`；不引入 YAML 库，行为完全可控。 */
@@ -298,7 +364,9 @@ export function decideStub(input) {
 
 /** 会话 id 取前 8 位，够人认。 */
 export function shortSession(id) {
-  const s = String(id == null ? '' : id)
+  // DSH 的会话 id 一律形如 `session-<uuid>`：直接取前 8 位会得到毫无信息量的 "session-"
+  // （v1.4.1 实测：兜底存根那行认不出是哪个会话）。先剥掉固定前缀再截。
+  const s = String(id == null ? '' : id).replace(/^session[-_]/, '')
   return s.length > 8 ? s.slice(0, 8) : s
 }
 
@@ -338,18 +406,53 @@ export async function apply(ctx) {
     }
   }
 
+  /**
+   * 指针文件属于宿主自己的目录（不在 vault 里），所以直读 node:fs ——
+   * 走 fsService 反而要为一个几十字节的小文件放一条跨边界白名单。
+   * 读失败 / 不存在 / 内容非法一律返回空串：它只是引导，不该让任何一条路挂掉。
+   */
+  function readPointerValue() {
+    try {
+      const home = guessDshHome(process.env)
+      if (home.length === 0) return ''
+      const file = home + '/' + POINTER_REL
+      if (!existsSync(file)) return ''
+      return parsePointerFile(readFileSync(file, 'utf8'))
+    } catch (error) {
+      return ''
+    }
+  }
+
+  /**
+   * 这一次请求 / 这一条写入该用哪个 vault，并说明依据（source 回给前端显示）。
+   * 只有落到 DEFAULT_VAULT 时才去采纳 vault 里的 `vault:` —— 机器本地三档已经
+   * 表过态，不能再被 git 同步过来的上一台机器的路径盖回去。
+   */
+  async function resolveVault(explicit, fsService) {
+    let picked = pickVaultSeed({
+      explicit,
+      env: process.env[ENV_VAULT_KEY],
+      pointer: readPointerValue(),
+      fallback: DEFAULT_VAULT,
+    })
+    if (picked.source === 'default' && fsService) {
+      const settings = await readSettingsFor(picked.vault, fsService)
+      const fromFile = settings ? normalizeVaultPath(settings.vault) : ''
+      if (fromFile.length > 0) picked = { vault: fromFile, source: 'vaultFile' }
+    }
+    return picked
+  }
+
   /** 兜底：这一轮做过事但 AI 没写要点时，补一条「待补充」存根。 */
   async function writeStubIfNeeded(sessionId) {
     try {
       const fsService = ctx.get('fs')
       if (fsService === undefined) return
 
-      let vault = DEFAULT_VAULT
+      const seed = await resolveVault('', fsService)
+      const vault = seed.vault
       const settings = await readSettingsFor(vault, fsService)
-      if (settings) {
-        if (settings.autoWriteOnSessionEnd === false) return
-        if (settings.vault) vault = String(settings.vault).replace(/\/+$/, '')
-      }
+      if (settings && settings.autoWriteOnSessionEnd === false) return
 
       const now = new Date()
       const today = localDate(now)
@@ -426,7 +529,8 @@ export async function apply(ctx) {
         const raw = (url.match(/[?&]vault=([^&]*)/) || [])[1] || ''
         let asked = raw
         try { asked = decodeURIComponent(raw) } catch (err) { asked = raw }
-        const vault = asked.trim().length > 0 ? asked.trim() : DEFAULT_VAULT
+        const seed = await resolveVault(asked, ctx.get('fs'))
+        const vault = seed.vault
 
         const shell = ctx.get('shell')
         if (shell === undefined) {
@@ -452,7 +556,7 @@ export async function apply(ctx) {
           result = await shell.run(spec)
         } catch (error) {
           const message = (error && error.message) ? error.message : String(error)
-          sendJson(res, 200, { ok: false, vault, error: '执行 git 失败：' + message })
+          sendJson(res, 200, { ok: false, vault, vaultSource: seed.source, error: '执行 git 失败：' + message })
           return
         }
 
@@ -462,11 +566,11 @@ export async function apply(ctx) {
 
         if (code !== 0) {
           const detail = (stderr || stdout || ('git 退出码 ' + String(code))).trim()
-          sendJson(res, 200, { ok: false, vault, error: detail.slice(0, 800) })
+          sendJson(res, 200, { ok: false, vault, vaultSource: seed.source, error: detail.slice(0, 800) })
           return
         }
 
-        sendJson(res, 200, { ok: true, vault, commits: parseLog(stdout) })
+        sendJson(res, 200, { ok: true, vault, vaultSource: seed.source, commits: parseLog(stdout) })
       } catch (err) {
         sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
       }
@@ -488,7 +592,8 @@ export async function apply(ctx) {
         try { askedVault = decodeURIComponent(rawVault) } catch (err) { askedVault = rawVault }
         try { askedPath = decodeURIComponent(rawPath) } catch (err) { askedPath = rawPath }
 
-        const vault = askedVault.trim().length > 0 ? askedVault.trim() : DEFAULT_VAULT
+        const seed = await resolveVault(askedVault, ctx.get('fs'))
+        const vault = seed.vault
         const relative = askedPath.replace(/\\/g, '/').replace(/^\/+/, '').trim()
 
         if (relative.length === 0) {
@@ -543,13 +648,13 @@ export async function apply(ctx) {
         const rawVault = (url.match(/[?&]vault=([^&]*)/) || [])[1] || ''
         let asked = rawVault
         try { asked = decodeURIComponent(rawVault) } catch (err) { asked = rawVault }
-        const base = asked.trim().length > 0 ? asked.trim() : DEFAULT_VAULT
-
         const fsService = ctx.get('fs')
         if (fsService === undefined) {
           sendJson(res, 200, { ok: false, error: 'Host 未提供 fs 服务', settings: DEFAULT_SETTINGS })
           return
         }
+        const seed = await resolveVault(asked, fsService)
+        const base = seed.vault
 
         const target = await fsService.resolve(base.replace(/\/+$/, '') + '/' + SETTINGS_REL)
 
@@ -557,7 +662,7 @@ export async function apply(ctx) {
         if (String(req.method || 'GET').toUpperCase() !== 'POST') {
           const info = await fsService.stat(target)
           if (!info) {
-            sendJson(res, 200, { ok: true, exists: false, source: SETTINGS_REL, settings: DEFAULT_SETTINGS })
+            sendJson(res, 200, { ok: true, exists: false, source: SETTINGS_REL, vaultSource: seed.source, vaultPath: base, settings: DEFAULT_SETTINGS })
             return
           }
           const text = String(await fsService.readText(target) || '')
@@ -565,6 +670,8 @@ export async function apply(ctx) {
             ok: true,
             exists: true,
             source: SETTINGS_REL,
+            vaultSource: seed.source,
+            vaultPath: base,
             settings: resolveSettings(parseFrontmatter(text)),
           })
           return
@@ -603,6 +710,8 @@ export async function apply(ctx) {
         sendJson(res, 200, {
           ok: true,
           source: SETTINGS_REL,
+          vaultSource: seed.source,
+          vaultPath: base,
           wrote: Object.keys(patch),
           settings: resolveSettings(parseFrontmatter(after)),
         })
@@ -649,26 +758,20 @@ export async function apply(ctx) {
       const fsService = ctx.get('fs')
       if (fsService === undefined) return '没写：Host 未提供 fs 服务。'
 
-      let vault = (typeof args.vault === 'string' && args.vault.trim().length > 0
-        ? args.vault.trim()
-        : DEFAULT_VAULT).replace(/\/+$/, '')
+      // v1.5.0：和路由走同一把梯子（显式 > 环境变量 > 指针文件 > vault 里的值 > 默认）。
+      // 改这里的原因：旧写法只认 DEFAULT_VAULT 下面那份设置，新机器上它不存在 ⇒
+      // 这条写入选路是死的，只能靠调用方每次显式传 vault。
+      const seed = await resolveVault(typeof args.vault === 'string' ? args.vault : '', fsService)
+      const vault = seed.vault
+      if (vault.length === 0) {
+        return '没写：解析不出 vault 路径 —— 显式参数、' + ENV_VAULT_KEY + '、指针文件、默认值都是空的。'
+      }
 
-      // 设置文件是权威：它说开关关着就不写；它指定了别的 vault 就以它为准
-      try {
-        const settingsTarget = await fsService.resolve(vault + '/' + SETTINGS_REL)
-        const settingsInfo = await fsService.stat(settingsTarget)
-        if (settingsInfo) {
-          const settingsText = String(await fsService.readText(settingsTarget) || '')
-          const resolved = resolveSettings(parseFrontmatter(settingsText))
-          if (resolved.autoWriteOnSessionEnd === false) {
-            return '没写：设置里 autoWriteOnSessionEnd 是关的（' + SETTINGS_REL + '）。要写就把它打开。'
-          }
-          if (typeof args.vault !== 'string' && resolved.vault) {
-            vault = resolved.vault.replace(/\/+$/, '')
-          }
-        }
-      } catch (error) {
-        // 设置读不到（文件不存在等）就按默认继续，不因此拒绝写入
+      // 设置文件仍然权威：它说开关关着就不写（机器本地三档压过它指定的路径，但管开关仍归它）
+      const settings = await readSettingsFor(vault, fsService)
+      if (settings && settings.autoWriteOnSessionEnd === false) {
+        return '没写：设置里 autoWriteOnSessionEnd 是关的（' + SETTINGS_REL
+          + '，vault 取自 ' + seed.source + '）。要写就把它打开。'
       }
 
       try {
