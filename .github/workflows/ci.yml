@@ -1,0 +1,29 @@
+name: CI
+
+# 发布前检查：push / PR 都跑同一套离线测试，任一环节非 0 退出即整体失败。
+#
+# 为什么是 windows-latest：套件都在 Windows 上实测通过（本机无 WSL 发行版，Linux/macOS 未实测）。
+# 为什么是 20/22/24 矩阵：仓库没写 engines，按 20/22 = 常见 LTS、24 = DSH Desktop 实际内置的运行时；
+#   三档已用**独立下载的** node 在干净环境逐套实测通过。
+#
+# 全程不联网跑测试：不读真实 vault、不调模型、不做任何真实下载。
+# 本仓库的工具目录里只有一套 verify-append-lock.mjs，无需排除任何套件。
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      # npm test = node tools/run-all.mjs：跑完再汇总，任一套失败 ⇒ 退出码 1。
+      # 测试不需要任何依赖，所以没有 npm install（离线可跑）。
+      - run: npm test

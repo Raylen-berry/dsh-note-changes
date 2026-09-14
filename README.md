@@ -19,6 +19,27 @@
 
 三处共用同一份数据源（Host 的 `/note-changes/*` 路由）。
 
+## 发布前检查（CI 与本地同一条命令）
+
+push / PR 都会跑 `.github/workflows/ci.yml`，它只做一件事：`npm test`。本地跑的就是同一条命令，
+**不装任何依赖、不联网、不读你的真实 vault**：
+
+```bash
+npm test                       # = node tools/run-all.mjs
+node tools/run-all.mjs --list  # 只看清单：跑哪些、以及哪些被排除、为什么
+```
+
+`tools/run-all.mjs` 把每套都跑完再汇总，任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
+CI 用 Node 20/22/24 三档矩阵、windows-latest。
+
+本机实测（Node 24.9.0）：
+
+| 套件 | 本机结果 |
+| --- | --- |
+| `tools/verify-append-lock.mjs` | 10 项通过（并发追加按路径串行 + 回读校验） |
+
+工具目录里只有这一套，无需排除任何套件。
+
 ## 安装
 
 ```powershell
