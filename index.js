@@ -64,6 +64,19 @@ const DEFAULT_SETTINGS = {
 const ENV_VAULT_KEY = 'DNC_VAULT'
 const POINTER_REL = 'dsh-note-changes/vault.txt'
 
+// ---- 同一路径的"读全文 → 拼接 → 写回全文"必须排队（2026-09-14 审计 P1）----
+// 本插件所有写入都是"读全文、改一处、写回全文"的形状。两个并发调用各读各的旧内容时，
+// 后写的那次会把先写的那次**整段覆盖**掉 —— 而且两次都返回成功，用户只看到记录莫名少了一条。
+// Node 是单线程，但 await 之间会交错，所以这里按路径串成一条 promise 链。
+// 注意 `prev.then(fn, fn)`：前一个任务失败也要继续放行后面的，否则一次失败会把该路径永久卡死。
+const writeLocks = new Map()
+function withWriteLock(key, fn) {
+  const prev = writeLocks.get(key) || Promise.resolve()
+  const run = prev.then(fn, fn)
+  writeLocks.set(key, run.then(function () {}, function () {}))
+  return run
+}
+
 /** 归一化 vault 路径：反斜杠→正斜杠、去尾斜杠；不是绝对路径返回空串（视为无效）。 */
 export function normalizeVaultPath(raw) {
   let s = String(raw == null ? '' : raw).trim().replace(/\\/g, '/')
@@ -695,16 +708,20 @@ export async function apply(ctx) {
           return
         }
 
-        const info = await fsService.stat(target)
-        const before = info ? String(await fsService.readText(target) || '') : ''
-        const after = patchFrontmatter(before, patch)
+        // 与日记追加同类的"读-改-写"，同样要排队：设置页连点两下开关会并发两个 POST。
+        const settingsKey = base.replace(/\/+$/, '') + '/' + SETTINGS_REL
+        await withWriteLock(settingsKey, async function () {
+          const info = await fsService.stat(target)
+          const before = info ? String(await fsService.readText(target) || '') : ''
+          const after = patchFrontmatter(before, patch)
 
-        // vault 在工作区之外，默认策略会拒绝（实测报
-        // 'file access denied under workspace-write mode'）。这里把沙箱范围显式收到
-        // vault 目录本身 —— 最窄的可用策略：只放行这个 vault，别处照旧受限。
-        await fsService.writeText(target, after, undefined, undefined, {
-          mode: 'workspace-write',
-          workspaceRoot: base.replace(/\/+$/, ''),
+          // vault 在工作区之外，默认策略会拒绝（实测报
+          // 'file access denied under workspace-write mode'）。这里把沙箱范围显式收到
+          // vault 目录本身 —— 最窄的可用策略：只放行这个 vault，别处照旧受限。
+          await fsService.writeText(target, after, undefined, undefined, {
+            mode: 'workspace-write',
+            workspaceRoot: base.replace(/\/+$/, ''),
+          })
         })
 
         sendJson(res, 200, {
@@ -782,15 +799,33 @@ export async function apply(ctx) {
         const rel = DAILY_DIR + '/' + date + '.md'
         const target = await fsService.resolve(vault + '/' + rel)
 
-        const info = await fsService.stat(target)
-        const before = info ? String(await fsService.readText(target) || '') : ''
-        const base = before.length > 0 ? before : dailySeed(date)
-        const after = appendEntry(base, buildEntry(now, args && args.title, points))
+        // 同一路径的"读全文 → 拼接 → 写回全文"必须**排队**（见 withWriteLock 的注释）：
+        // 两次并发追加各读各的旧内容时，后写的会把先写的整段覆盖掉，而两次都返回成功。
+        const lockKey = vault.replace(/\/+$/, '') + '/' + rel
+        const appended = await withWriteLock(lockKey, async function () {
+          const info = await fsService.stat(target)
+          const before = info ? String(await fsService.readText(target) || '') : ''
+          const base = before.length > 0 ? before : dailySeed(date)
+          const after = appendEntry(base, buildEntry(now, args && args.title, points))
 
-        // vault 在工作区之外，必须显式给最窄的沙箱策略（同设置路由）
-        await fsService.writeText(target, after, undefined, undefined, {
-          mode: 'workspace-write',
-          workspaceRoot: vault,
+          // vault 在工作区之外，必须显式给最窄的沙箱策略（同设置路由）
+          await fsService.writeText(target, after, undefined, undefined, {
+            mode: 'workspace-write',
+            workspaceRoot: vault,
+          })
+
+          // 回读校验：把"静默丢失"变成可见错误。带上我们的内容再读一次，
+          // 若那段不在盘上（别的进程/别的写入者在这中间覆盖了），就当这次追加失败报出来，
+          // 而不是回一句"已写入"却什么都没留下。
+          const added = after.slice(base.length)
+          const anchor = added.slice(0, 60)
+          if (anchor.length > 0) {
+            const verify = String(await fsService.readText(target) || '')
+            if (verify.indexOf(anchor) < 0) {
+              throw new Error('写入后回读校验失败：本次要点没有出现在 ' + rel + '（可能被并发的写入者覆盖）')
+            }
+          }
+          return { before: base.length, after: after.length, existed: !!info }
         })
 
         // 记下"这个会话这一轮已经写过要点"，兜底就不会再补存根。
@@ -805,7 +840,8 @@ export async function apply(ctx) {
         }
 
         return '已写入 ' + String(points.length) + ' 条要点到 ' + rel
-          + '（' + (info ? '追加到已有文件' : '新建了当日记录') + '）'
+          + '（' + appended.before + ' → ' + appended.after + ' 字符）'
+          + '（' + (appended.existed ? '追加到已有文件' : '新建了当日记录') + '）'
       } catch (error) {
         const message = (error && error.message) ? error.message : String(error)
         return '没写：' + message
