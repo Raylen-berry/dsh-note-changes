@@ -849,5 +849,7 @@ export async function apply(ctx) {
     },
   }), 'dsh-note-changes: vault_note_append tool')
 
-  console.log('[dsh-note-changes] host up (v1.5.0)')
+  // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
+  // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
+  console.log('[dsh-note-changes] host up (v1.5.2)')
 }

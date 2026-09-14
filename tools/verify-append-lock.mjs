@@ -90,6 +90,17 @@ const text2 = readFileSync(pathMod.join(DAILY, files[0]), 'utf8')
 ok('串行追加后三条都在', ['A 的第一条要点', 'B 的第一条要点', 'C 的一条要点'].every((s) => text2.includes(s)))
 ok('返回里带了长度变化', /→/.test(String(r3)), String(r3).slice(0, 40))
 
+console.log('\n— 4. 日志版本号与 package.json 一致（防"日志写死版本"变成误导源）—')
+// 现场：日志长期打 `host up (v1.5.0)` 而 package.json 已是 1.5.2 —— 排查时会把人往错版本上带。
+// 不放开运行时去读 package.json（给宿主加载路径加一次 IO 不值当），改为把"字面量 == 真版本"钉进门禁。
+const PKG_DIR = pathMod.dirname(pathMod.resolve(INDEX))
+const pkgVersion = JSON.parse(readFileSync(pathMod.join(PKG_DIR, 'package.json'), 'utf8')).version
+const hostSrc = readFileSync(pathMod.resolve(INDEX), 'utf8')
+const logVersions = [...hostSrc.matchAll(/host up \((?:v)?(\d+\.\d+\.\d+)/g)].map((m) => m[1])
+ok('日志里找得到版本号字面量', logVersions.length > 0, logVersions.join(','))
+ok('日志版本 == package.json 版本', logVersions.length > 0 && logVersions.every((v) => v === pkgVersion),
+  '日志=' + (logVersions.join(',') || '(无)') + '  package.json=' + pkgVersion)
+
 // 清场（夹具在临时区，不影响真实 vault）
 rmSync(ROOT, { recursive: true, force: true })
 
