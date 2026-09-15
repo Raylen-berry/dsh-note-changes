@@ -8,8 +8,9 @@
 //   - 抽屉底部是一根**拉杆**：展开后列出这批改动碰过的笔记，点开直接读正文
 //     （正文由 Host 的 /note-changes/note 提供；自带极简 Markdown 渲染）
 //   - 设置页内容**居中**
-//   - z-index 明确压在其它浮层之下：会话策略快捷面板 .cc-panel 与
-//     五子棋浮窗都是 2147483000，本插件用 2147482900／2800 ⇒ 不会盖住它们
+//   - z-index 按**跨插件浮窗梯子**取值（2026-09-15 统一，见 dsh-plugins/FLOATING-WINDOWS.md）：
+//     本插件标签 2147483410（面板/pop 3420）低于小游戏浮窗 2147483440、
+//     低于浏览器观察窗 2147483450/3460，仍高于缓存插件面板 2147483400 ⇒ 不盖住它们，也不被面板盖住
 //
 // 开发提醒（实测）：**client 半改完只要刷新页面**——客户端模块由
 // /plugins/??<pkg>/client.js&rev=<内容哈希> 现取，rev 随文件变化。
@@ -50,7 +51,7 @@ window.__ModuleLoader__.load({
 
     var CSS = [
       // ---------- 折叠态：右侧竖排标签 ----------
-      '.dnc-tab{position:fixed;right:0;top:max(88px,36vh);pointer-events:auto;z-index:2147482800;',
+      '.dnc-tab{position:fixed;right:0;top:max(88px,36vh);pointer-events:auto;z-index:2147483410;',
       'display:inline-flex;align-items:center;justify-content:center;padding:14px 8px;',
       'border:1px solid var(--dsw-alias-border-l2);border-right:none;border-radius:12px 0 0 12px;',
       'cursor:pointer;font-size:12px;letter-spacing:2px;writing-mode:vertical-rl;',
@@ -65,7 +66,7 @@ window.__ModuleLoader__.load({
       // 709px 视口 → 272px（下限）而不是 392px。
       'width:clamp(272px, 34vw, 392px);',
       'height:min(60vh,500px);max-height:calc(100vh - ' + (TITLEBAR_INSET + 80) + 'px);',
-      'pointer-events:auto;z-index:2147482900;display:flex;flex-direction:column;',
+      'pointer-events:auto;z-index:2147483420;display:flex;flex-direction:column;',
       'border:1px solid var(--dsw-alias-border-l2);border-radius:16px;overflow:hidden;',
       'background:var(--dsw-alias-bg-overlay);box-shadow:0 18px 48px rgba(0,0,0,.26)}',
       '.dnc-head{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:10px 10px 10px 16px;border-bottom:1px solid var(--dsw-alias-border-l1);cursor:grab}',
@@ -162,7 +163,7 @@ window.__ModuleLoader__.load({
       '.dnc-chip.on{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover)}',
       '.dnc-chipDot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-border-l3);flex:none}',
       '.dnc-chipDot.on{background:var(--dsw-alias-state-success-primary)}',
-      '.dnc-pop{position:fixed;z-index:2147482900;width:300px;box-sizing:border-box;',
+      '.dnc-pop{position:fixed;z-index:2147483420;width:300px;box-sizing:border-box;',
       'max-height:calc(100vh - 24px);overflow:auto;display:flex;flex-direction:column;gap:8px;',
       'padding:11px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;',
       'background:var(--dsw-alias-bg-overlay);box-shadow:0 12px 34px rgba(0,0,0,.28);',
@@ -852,7 +853,7 @@ window.__ModuleLoader__.load({
 
       // ---- 面板拖拽 ----
       // 为什么需要它：右侧边缘是多方争用的位置——置顶气泡（会话区顶部、右对齐，
-      // 上限 列宽×.55）、dsh-browser-live 的观察窗（z 2147483050，全场最高）都会压到这里。
+      // 上限 列宽×.55）、dsh-browser-live 的观察窗（z 2147483460，全场最高）都会压到这里。
       // 靠固定位置永远摆不平，交给用户自己拖最实在。位置记在 localStorage，
       // 双击标题栏复位回「靠右 + 上下居中」。
       var dragState = null
