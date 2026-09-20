@@ -38,7 +38,7 @@ CI 用 Node 20/22/24 三档矩阵、windows-latest。
 | 套件 | 本机结果 |
 | --- | --- |
 | `tools/verify-append-lock.mjs` | 10 项通过（并发追加按路径串行 + 回读校验） |
-| `tools/verify-git-sync.mjs` | 44 项通过（提交信息 / 命令序列 / 失败分支 / 两条路的接线 / 破坏性命令不变量） |
+| `tools/verify-git-sync.mjs` | 48 项通过（提交信息 / 命令序列 / 失败分支 / 两条路的接线 / 破坏性命令不变量 / 沙箱策略挂载） |
 
 工具目录里只有这两套，无需排除任何套件。
 
@@ -47,13 +47,15 @@ CI 用 Node 20/22/24 三档矩阵、windows-latest。
 两个套件都能对着**改动前**的 `index.js` 复现失败（用 `DNC_INDEX` 指过去即可）：
 
 ```bash
-node tools/make-unwired-variant.mjs index.js /tmp/unwired.js   # 生成「摘掉同步接线」的变体
-DNC_INDEX=/tmp/unwired.js node tools/verify-git-sync.mjs       # 应当 6 条 FAIL
+node tools/make-unwired-variant.mjs index.js /tmp/unwired.js            # 摘掉同步接线 → 9 条 FAIL
+node tools/make-unwired-variant.mjs index.js /tmp/nopolicy.js policy    # 摘掉沙箱策略 → 2 条 FAIL
+DNC_INDEX=/tmp/unwired.js node tools/verify-git-sync.mjs
 ```
 
 `make-unwired-variant.mjs` 只为这件事存在，不是套件（`run-all` 的登记检查不认它）。
 **它自己踩过一次坑**：第一版把锚点换成 `return '' || await syncAfterWrite({` —— `''` 是假值，
-`||` 继续求值，接线根本没摘掉，变体照样全绿 ⇒ 假阳性。摘接线必须整段替换成常量。
+`||` 继续求值，接线根本没摘掉，变体照样全绿 ⇒ 假阳性。摘接线必须整段替换成常量；
+现在锚点匹配失败会**报错退出**，不产假变体。
 同一次还暴露出套件本身的问题：断言里直接下标取数组，摘掉接线后会抛 `TypeError` 把后面所有断言
 连同汇总行一起吞掉；现在下标一律先兜底成空串。
 
@@ -80,6 +82,32 @@ git -c core.quotepath=false -C "<vault>" push
    绝不 `--force`、不删远端分支、不 `--no-verify`。套件第 4 节断言全部命令里不出现这些破坏性手段。
 
 > 为什么必须做在插件里：兜底存根那条路**不经过 agent**，只靠 vault 的 `AGENTS.md` 约定是管不到它的。
+
+### 必须显式带沙箱策略（v1.6.1 修，端到端才暴露）
+
+shell 里跑 git **必须**带上 `{ mode: 'workspace-write', workspaceRoot: <vault 的 realpath> }`：
+
+```js
+shell.resolve({ command, workdir: vault, timeoutMs, stdoutMaxBytes, sandboxPolicy: vaultSandboxPolicy(vault) })
+```
+
+原因：`ctx.sandboxPolicy.resolve()` 的 `workspaceRoot` **只从 session 取**
+（`session?.header.cwd ?? this.workspaceRoot`，见 `@deepseek-ai/dsh-sandbox-policy`），而 vault 在会话工作区**之外**
+⇒ 不带策略就按会话策略（对 vault 而言只读）执行，`git add` 连锁文件都建不出来。v1.6.0 实测原话：
+
+```
+fatal: Unable to create 'D:/DeepSeek/vault/.git/index.lock': Permission denied
+```
+
+三个容易误判的点：
+
+1. **`git log` 能跑不代表写能跑** —— 路由一直在跑 `git log`，纯只读，只读永远不受限。这个 bug 是"端到端第一次
+   真实写入"才炸出来的，离线套件与 CI 全绿照样漏。所以套件第 5 节现在断言"策略挂在 spec 上"，
+   而不是只看 command 字符串。
+2. **`workspaceRoot` 要取 realpath**（`realpathSync.native`，失败回退原值）—— 它是 Windows ACL 授权的依据，
+   软链接/junction 下不取 realpath 会授权到错的目录。
+3. **只划 vault 为可写**，不改成 `danger-full-access`：与插件写盘那条路（`fsService.writeText` 传
+   `{ mode:'workspace-write', workspaceRoot: vault }`）同一口径，narrowest-that-works。
 
 ## 安装
 
@@ -262,6 +290,14 @@ v1.5.0 给了一条**不依赖 vault** 的引导，按优先级取第一个非�
 
 完整历史见 `git log`；下面只记**行为会变**的节点。
 
+- **v1.6.1**：修 v1.6.0 的**沙箱漏配置**。重启后第一次真实写入就炸：
+  `已写入 2 条要点…（未同步：git add 失败：fatal: Unable to create 'D:/DeepSeek/vault/.git/index.lock': Permission denied）`
+  —— 写盘成功（设计上同步失败不吞内容，附注如实报因），但同步跑不起来。
+  根因：`ctx.sandboxPolicy.resolve()` 的 `workspaceRoot` 只从 session 取，而 vault 在会话工作区之外，
+  于是 shell 里的 git 被按只读执行。修法：每次 shell 调用显式带
+  `sandboxPolicy: { mode:'workspace-write', workspaceRoot: <vault realpath> }`，与写盘那条路同一口径。
+  **教训**：`git log` 路由一直能跑，纯只读不受限 ⇒ 这个 bug 只有"端到端真实写入"才炸得出来；
+  离线套件与 CI 全绿也照样漏。现在套件第 5 节断言策略挂在 spec 上，并有 `policy` 变体做 A/B（2 条 FAIL）。
 - **v1.6.0**：**写完即 commit + push**。两条写入选路（`vault_note_append` 工具、idle 兜底存根）落盘成功后
   立刻 `git add <那一个文件>` → `commit` → `push`，目标是「换设备只需要 `git pull`」。
   此前规则只写在 vault 的 `AGENTS.md` 里（靠 agent 记性），而**兜底存根不经过 agent**，那条路永远是

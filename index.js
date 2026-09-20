@@ -17,7 +17,7 @@
 //   修法：git config --global --add safe.directory <vault 路径>
 // ============================================================================
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 
 export const name = 'dsh-note-changes'
 
@@ -536,8 +536,30 @@ export async function apply(ctx) {
   }
 
   /**
+   * 这次 shell 调用用的沙箱策略：**只把 vault 划成可写**，与 fs 写入路径同一口径
+   * （`{ mode:'workspace-write', workspaceRoot: vault }`）。
+   *
+   * 为什么非给不可（v1.6.1 修，2026-09-20 端到端实测）：
+   * `ctx.sandboxPolicy.resolve()` 的 workspaceRoot **只从 session 取**
+   * （`session?.header.cwd ?? this.workspaceRoot`，见 @deepseek-ai/dsh-sandbox-policy），
+   * 而 vault 在会话工作区之外 ⇒ 不给就被按会话策略（对 vault 而言只读）执行，
+   * `git add` 连锁文件都建不出来。实测原话：
+   *   fatal: Unable to create 'D:/DeepSeek/vault/.git/index.lock': Permission denied
+   * 注意：这条**不会**因为 git log 路由能跑就被掩盖 —— git log 只读，只读永远不受限。
+   *
+   * workspaceRoot 按沙箱自己的口径取 realpath（`canonicalPath` = `realpathSync.native`，
+   * 失败回退原值）：它是 Windows ACL 授权的依据，软链接/junction 下不取 realpath 会授权到错的目录。
+   */
+  function vaultSandboxPolicy(vault) {
+    let root = vault
+    try { root = realpathSync.native(vault) } catch { /* vault 不存在就照原样用，让 git 自己报错 */ }
+    return { mode: 'workspace-write', workspaceRoot: root }
+  }
+
+  /**
    * 在 vault 目录里跑一条 git（真机实现）。args 各项是**已做引号处理的 shell 片段**。
-   * 与 /note-changes/log 路由共用同一个 shell 服务 ⇒ 沙箱与权限行为一致，不另开一条口子。
+   * 与 /note-changes/log 路由共用同一个 shell 服务 ⇒ 沙箱与权限行为一致，不另开一条口子；
+   * 唯一区别是这里**显式带上 vault 的沙箱策略**（写操作必需，理由见 vaultSandboxPolicy）。
    */
   async function runGitIn(vault, args, timeoutMs) {
     const shell = ctx.get('shell')
@@ -547,6 +569,7 @@ export async function apply(ctx) {
       workdir: vault,
       timeoutMs,
       stdoutMaxBytes: 200000,
+      sandboxPolicy: vaultSandboxPolicy(vault),
     })
     const result = await shell.run(spec)
     return {
@@ -967,5 +990,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.6.0)')
+  console.log('[dsh-note-changes] host up (v1.6.1)')
 }
