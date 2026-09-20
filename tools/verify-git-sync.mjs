@@ -69,15 +69,17 @@ console.log('\n— 2. syncAfterWrite 命令序列 —')
 const NONE = { code: 0, stdout: '', stderr: '' }
 function recorder(script) {
   const seen = []
-  const runGit = async (args) => {
+  const lanes = []
+  const runGit = async (args, _timeoutMs, lane) => {
     const cmd = args.join(' ')
     seen.push(cmd)
+    lanes.push(lane == null ? '' : lane)
     const reply = script[cmd]
     // 数组 = 这条命令按次序返回不同结果（"第一次 push 被拒、rebase 后第二次成功"就得这样写）
     if (Array.isArray(reply)) return reply.length > 1 ? reply.shift() : reply[0]
     return reply === undefined ? NONE : reply
   }
-  return { seen, runGit }
+  return { seen, lanes, runGit }
 }
 const body = (rel, message) => ({ runGit: null, rel, message })
 
@@ -90,6 +92,19 @@ const body = (rel, message) => ({ runGit: null, rel, message })
     && /^commit /.test(r.seen[2]) && r.seen[3] === 'push', r.seen.join(' | '))
   ok('add 的是**那一个**文件（带路径），不是 -A',
     r.seen[1].includes(REL) && !/\s-A\b|--all/.test(r.seen[1]), r.seen[1])
+  // v1.6.2：lane 必须由 syncAfterWrite 明说，不能让实现方去猜命令内容 ——
+  // 真机实测受限模式里 git 建不出管道，只有走网络那两手需要放宽。
+  ok('只有 push 走 network 腿，rev-parse/add/commit 走默认 write 腿',
+    r.lanes.join(',') === ',,,' + mod.LANE_NETWORK, 'lanes=' + JSON.stringify(r.lanes))
+}
+{
+  const r = recorder({ push: [{ code: 1, stderr: '! [rejected] main -> main (non-fast-forward)' }, NONE] })
+  await mod.syncAfterWrite({ ...body(REL, 'm'), runGit: r.runGit })
+  // 序列：rev-parse, add, commit, push(被拒), pull --rebase, push —— 走网络的三手都必须是 network 腿
+  ok('被拒后的 pull --rebase 与重推也走 network 腿',
+    r.seen.length === 6 && r.lanes[3] === mod.LANE_NETWORK
+    && r.lanes[4] === mod.LANE_NETWORK && r.lanes[5] === mod.LANE_NETWORK
+    && r.lanes.slice(0, 3).every((l) => l !== mod.LANE_NETWORK), JSON.stringify(r.lanes))
 }
 {
   const r = recorder({})
@@ -254,14 +269,36 @@ console.log('\n— 5. 沙箱策略：只把 vault 划成可写 —')
 ok('确实抓到了 shell 调用（否则下面的 every 是空真）', specs.length > 0 && specs.length === commands.length,
   specs.length + ' 条 spec / ' + commands.length + ' 条命令')
 const VAULT_REAL = fs.realpathSync.native(VAULT)
-ok('每条 git 调用都显式带沙箱策略，且模式是 workspace-write',
-  specs.length > 0 && specs.every((s) => s.sandboxPolicy && s.sandboxPolicy.mode === 'workspace-write'),
-  specs.map((s) => (s.sandboxPolicy || {}).mode || '(无)').join(','))
+// 取策略一律走这个：策略缺失（正是变体要制造的情形）时返回 '(无)'，
+// 绝不在断言里直接 .sandboxPolicy.xxx —— 那会抛 TypeError 把后面的断言全吞掉。
+const polOf = (s) => (s && s.sandboxPolicy ? s.sandboxPolicy : {})
+const modeOf = (s) => String(polOf(s).mode || '(无)')
+// write 腿 = 不带 lane 的那几手（rev-parse / add / commit）；网络腿单独断言，见下面 v1.6.2 那组。
+const writeSpecs = specs.filter((s, i) => !/ push$|pull --rebase/.test(String(commands[i])))
+ok('确实抓到了 shell 调用（否则下面的 every 是空真）', specs.length > 0 && specs.length === commands.length,
+  specs.length + ' 条 spec / ' + commands.length + ' 条命令')
+ok('每条 git 调用都显式带沙箱策略，且 write 腿模式是 workspace-write',
+  writeSpecs.length > 0 && writeSpecs.every((s) => modeOf(s) === 'workspace-write'),
+  writeSpecs.map(modeOf).join(','))
 ok('策略的 workspaceRoot 指向 vault 的 realpath（ACL 授权的依据，必须取 realpath）',
-  specs.length > 0 && specs.every((s) => s.sandboxPolicy && s.sandboxPolicy.workspaceRoot === VAULT_REAL),
-  (specs[0] && specs[0].sandboxPolicy ? specs[0].sandboxPolicy.workspaceRoot : '(无)') + ' vs ' + VAULT_REAL)
-ok('没有把策略放宽成 danger-full-access / read-only',
-  specs.every((s) => !s.sandboxPolicy || (s.sandboxPolicy.mode !== 'danger-full-access' && s.sandboxPolicy.mode !== 'read-only')))
+  writeSpecs.length > 0 && writeSpecs.every((s) => polOf(s).workspaceRoot === VAULT_REAL),
+  String((writeSpecs[0] ? polOf(writeSpecs[0]).workspaceRoot : '(无)')) + ' vs ' + VAULT_REAL)
+
+// ── v1.6.2：走网络的那两手必须是另一套模式（真机实测：受限模式里 git 建不出管道）
+const netSpecs = specs.filter((s, i) => / push$|pull --rebase/.test(String(commands[i])))
+ok('确实抓到了走网络的调用（否则下面的 every 是空真）',
+  netSpecs.length > 0 && netSpecs.length + writeSpecs.length === specs.length,
+  netSpecs.length + ' 条网络 / ' + specs.length + ' 条总')
+ok('push 与 pull --rebase 都走非受限模式（受限模式不允许建管道 ⇒ HTTPS 传输必失败）',
+  netSpecs.length > 0 && netSpecs.every((s) => modeOf(s) === 'danger-full-access'),
+  netSpecs.map(modeOf).join(','))
+ok('权限放宽只发生在网络那两手上：add / commit / rev-parse 仍是 workspace-write',
+  writeSpecs.length > 0 && writeSpecs.every((s) => modeOf(s) === 'workspace-write'),
+  writeSpecs.map(modeOf).join(','))
+ok('网络腿不再带 workspaceRoot（它跳过 confine()，带着反而像是还受限于某个根）',
+  netSpecs.length > 0 && netSpecs.every((s) => polOf(s).workspaceRoot === undefined))
+ok('syncAfterWrite 把 lane 传给了 runGit（不靠实现方猜命令内容）',
+  mod.LANE_NETWORK === 'network' && typeof mod.syncAfterWrite === 'function', String(mod.LANE_NETWORK))
 
 globalThis.setTimeout = realSetTimeout
 rmSync(ROOT, { recursive: true, force: true })

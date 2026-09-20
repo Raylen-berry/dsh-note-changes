@@ -1,7 +1,7 @@
 {
   "name": "dsh-note-changes",
-  "version": "1.6.1",
-  "description": "在 DSH 里查看 Obsidian vault 的笔记改动历史：读取 vault 的 git 提交，在右侧可拉开的抽屉和设置页分区里列出每次提交改动过哪些 Markdown 笔记。上半（列历史）只读，下半会写：另登记一个 vault_note_append 工具 + 一条 idle 兜底存根，两者都只追加到当日日记，受 vault 里 00-索引/插件设置.md 的 autoWriteOnSessionEnd 开关统一控制。v1.6.0 起两条写入选路**写完即 commit + push**（只 add 本次写的那一个文件；push 被拒先 pull --rebase 再重推一次，仍失败就停手报人不 --force），让用户换设备只需要 git pull；同步失败绝不吞掉已写内容，只作附注回报。v1.6.1 修：shell 调用必须显式带 { mode:'workspace-write', workspaceRoot: vault 的 realpath } —— ctx.sandboxPolicy.resolve() 的 root 只从 session 取，vault 在会话工作区之外，不带策略时 git 连 .git/index.lock 都建不出来（Permission denied）。两个开关存在 vault 自己的 frontmatter 里、随 git 迁移；vault 路径是本机专属的，v1.5.0 起按「显式参数 > 环境变量 DNC_VAULT > 指针文件 $DSH_HOME/dsh-note-changes/vault.txt > vault 里的 vault: > 内置默认」裁决，换机器只写那一个指针文件。复用 DSH 原生 UI 组件。**换台机器：装完必须重启 DSH Desktop（client 半在启动时 compose，刷新页面不够）。**",
+  "version": "1.6.2",
+  "description": "在 DSH 里查看 Obsidian vault 的笔记改动历史：读取 vault 的 git 提交，在右侧可拉开的抽屉和设置页分区里列出每次提交改动过哪些 Markdown 笔记。上半（列历史）只读，下半会写：另登记一个 vault_note_append 工具 + 一条 idle 兜底存根，两者都只追加到当日日记，受 vault 里 00-索引/插件设置.md 的 autoWriteOnSessionEnd 开关统一控制。v1.6.0 起两条写入选路**写完即 commit + push**（只 add 本次写的那一个文件；push 被拒先 pull --rebase 再重推一次，仍失败就停手报人不 --force），让用户换设备只需要 git pull；同步失败绝不吞掉已写内容，只作附注回报。沙箱两腿（端到端实测换来的）：add/commit 显式带 { mode:'workspace-write', workspaceRoot: vault realpath } —— ctx.sandboxPolicy.resolve() 的 root 只从 session 取，vault 在会话工作区之外时 git 连 .git/index.lock 都建不出来；push/pull 只能走 danger-full-access —— Windows 受限模式不允许建管道，而 git 的 HTTPS 传输必须给 git-remote-https 开 stdin 管道。两个开关存在 vault 自己的 frontmatter 里、随 git 迁移；vault 路径是本机专属的，v1.5.0 起按「显式参数 > 环境变量 DNC_VAULT > 指针文件 $DSH_HOME/dsh-note-changes/vault.txt > vault 里的 vault: > 内置默认」裁决，换机器只写那一个指针文件。复用 DSH 原生 UI 组件。**换台机器：装完必须重启 DSH Desktop（client 半在启动时 compose，刷新页面不够）。**",
   "keywords": [
     "dsh",
     "dsh-plugin",

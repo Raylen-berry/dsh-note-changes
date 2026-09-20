@@ -19,11 +19,13 @@ const EOL = src.includes('\r\n') ? '\r\n' : '\n'
 
 const VARIANTS = {
   wiring: {
+    // 锚点 = 函数头到 `})` 整段（含注释行）。中间那段参数在 CRLF 工作副本里跨行匹配不稳，
+    // 一旦失配本工具会**报错退出**，绝不静默产出"假变体"让反向验证变成假阳性。
     from: [
       '  /** 写完一个文件后立刻提交推送；附注（成功或失败原因）交给调用方回报，永不抛。 */',
       '  async function syncWrittenFile(vault, rel, message) {',
       '    return await syncAfterWrite({',
-      '      runGit: (args, timeoutMs) => runGitIn(vault, args, timeoutMs),',
+      "      runGit: (args, timeoutMs, lane) => runGitIn(vault, args, timeoutMs, lane),",
       '      rel,',
       '      message,',
       '    })',
@@ -36,7 +38,13 @@ const VARIANTS = {
     ].join(EOL),
   },
   policy: {
-    from: '      sandboxPolicy: vaultSandboxPolicy(vault),' + EOL,
+    from: '      sandboxPolicy: vaultSandboxPolicy(vault, lane),' + EOL,
+    to: '',
+  },
+  // v1.6.2：把"走网络那两手退回受限模式"做成变体 —— 真机上这正是 push 失败的原因
+  // （受限模式不允许建管道，git 的 HTTPS 传输必须给 git-remote-https 开一条 stdin 管道）。
+  network: {
+    from: "    if (lane === 'network') return { mode: 'danger-full-access' }" + EOL,
     to: '',
   },
 }

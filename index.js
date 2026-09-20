@@ -399,7 +399,12 @@ export function buildStubEntry(now, sessionId) {
 //      同步问题只作为附注回报（见 syncAfterWrite 的返回值约定）。
 //   3. push 被拒 = 另一台机器推过 ⇒ 先 `pull --rebase` 再重推一次；仍失败就停手报人，
 //      绝不 `--force`、不删远端分支、不 `--no-verify`。
+//   4. `push` / `pull --rebase` 走 LANE_NETWORK 这条腿：Windows 沙箱的受限模式不允许建管道，
+//      而 git 的 HTTPS 传输必须给 git-remote-https 开 stdin 管道（见 vaultSandboxPolicy 注释）。
 const SYNC_TITLE_MAX = 60
+
+/** 走网络的 git（push / pull）用的腿名；其余用默认的 write 腿（只给 vault 可写）。 */
+export const LANE_NETWORK = 'network'
 
 /** 提交信息：单行、带日期、剔掉会打乱 shell 引号的字符。 */
 export function buildSyncMessage(purpose, date, title) {
@@ -451,15 +456,15 @@ export async function syncAfterWrite({ runGit, rel, message }) {
       return note('已写入，但提交失败：' + gitDetail(commit))
     }
 
-    let push = await runGit(['push'], 60000)
+    let push = await runGit(['push'], 60000, LANE_NETWORK)
     if (push && push.code === 0) return '，已提交并推送'
 
     if (isPushRejected(gitDetail(push))) {
-      const pull = await runGit(['pull', '--rebase'], 60000)
+      const pull = await runGit(['pull', '--rebase'], 60000, LANE_NETWORK)
       if (!pull || pull.code !== 0) {
         return note('已本地提交，但推送被拒且 rebase 失败，需人工处理：' + gitDetail(pull))
       }
-      push = await runGit(['push'], 60000)
+      push = await runGit(['push'], 60000, LANE_NETWORK)
       if (push && push.code === 0) return '，已提交并推送（先 rebase）'
     }
     return note('已本地提交，但推送失败：' + gitDetail(push))
@@ -536,10 +541,12 @@ export async function apply(ctx) {
   }
 
   /**
-   * 这次 shell 调用用的沙箱策略：**只把 vault 划成可写**，与 fs 写入路径同一口径
-   * （`{ mode:'workspace-write', workspaceRoot: vault }`）。
+   * 这次 shell 调用用的沙箱策略。**两条腿，两种模式**（v1.6.2 定型）：
    *
-   * 为什么非给不可（v1.6.1 修，2026-09-20 端到端实测）：
+   *   lane = 'network' → { mode:'danger-full-access' }
+   *   其它（默认 write）→ { mode:'workspace-write', workspaceRoot: vault 的 realpath }
+   *
+   * 为什么 write 腿非给策略不可（v1.6.1 修，2026-09-20 端到端实测）：
    * `ctx.sandboxPolicy.resolve()` 的 workspaceRoot **只从 session 取**
    * （`session?.header.cwd ?? this.workspaceRoot`，见 @deepseek-ai/dsh-sandbox-policy），
    * 而 vault 在会话工作区之外 ⇒ 不给就被按会话策略（对 vault 而言只读）执行，
@@ -547,10 +554,20 @@ export async function apply(ctx) {
    *   fatal: Unable to create 'D:/DeepSeek/vault/.git/index.lock': Permission denied
    * 注意：这条**不会**因为 git log 路由能跑就被掩盖 —— git log 只读，只读永远不受限。
    *
+   * 为什么 network 腿不能用 workspace-write（v1.6.2，同一次端到端实测的下一步）：
+   * Windows 沙箱在受限模式下**不允许创建管道**，而 git 的 HTTPS 传输必须给
+   * `git-remote-https` 开一条 stdin 管道 ⇒ 受限模式里 push 必然失败：
+   *   error: cannot create standard input pipe for remote-https: Permission denied
+   * 所以推送那一腿只能走非受限模式（pwsh-sandbox 见 mode==='danger-full-access'
+   * 就 `return super.run(spec)`，整个跳过 confine()）。**这是本插件唯一一处权限放宽**，
+   * 代价可控的理由：命令是插件自己拼的固定形状（只有 `push` / `pull --rebase`）、
+   * workdir 锁在 vault、不接受调用方传入任意命令；add/commit 仍然只给 vault 可写。
+   *
    * workspaceRoot 按沙箱自己的口径取 realpath（`canonicalPath` = `realpathSync.native`，
    * 失败回退原值）：它是 Windows ACL 授权的依据，软链接/junction 下不取 realpath 会授权到错的目录。
    */
-  function vaultSandboxPolicy(vault) {
+  function vaultSandboxPolicy(vault, lane) {
+    if (lane === 'network') return { mode: 'danger-full-access' }
     let root = vault
     try { root = realpathSync.native(vault) } catch { /* vault 不存在就照原样用，让 git 自己报错 */ }
     return { mode: 'workspace-write', workspaceRoot: root }
@@ -558,10 +575,10 @@ export async function apply(ctx) {
 
   /**
    * 在 vault 目录里跑一条 git（真机实现）。args 各项是**已做引号处理的 shell 片段**。
-   * 与 /note-changes/log 路由共用同一个 shell 服务 ⇒ 沙箱与权限行为一致，不另开一条口子；
-   * 唯一区别是这里**显式带上 vault 的沙箱策略**（写操作必需，理由见 vaultSandboxPolicy）。
+   * 与 /note-changes/log 路由共用同一个 shell 服务 ⇒ 权限栈一致，不另开一条口子；
+   * 区别是这里**显式带上沙箱策略**（理由见 vaultSandboxPolicy 的注释）。
    */
-  async function runGitIn(vault, args, timeoutMs) {
+  async function runGitIn(vault, args, timeoutMs, lane) {
     const shell = ctx.get('shell')
     if (shell === undefined) throw new Error('Host 未提供 shell 服务')
     const spec = shell.resolve({
@@ -569,7 +586,7 @@ export async function apply(ctx) {
       workdir: vault,
       timeoutMs,
       stdoutMaxBytes: 200000,
-      sandboxPolicy: vaultSandboxPolicy(vault),
+      sandboxPolicy: vaultSandboxPolicy(vault, lane),
     })
     const result = await shell.run(spec)
     return {
@@ -582,7 +599,7 @@ export async function apply(ctx) {
   /** 写完一个文件后立刻提交推送；附注（成功或失败原因）交给调用方回报，永不抛。 */
   async function syncWrittenFile(vault, rel, message) {
     return await syncAfterWrite({
-      runGit: (args, timeoutMs) => runGitIn(vault, args, timeoutMs),
+      runGit: (args, timeoutMs, lane) => runGitIn(vault, args, timeoutMs, lane),
       rel,
       message,
     })
@@ -990,5 +1007,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.6.1)')
+  console.log('[dsh-note-changes] host up (v1.6.2)')
 }

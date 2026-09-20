@@ -38,7 +38,7 @@ CI 用 Node 20/22/24 三档矩阵、windows-latest。
 | 套件 | 本机结果 |
 | --- | --- |
 | `tools/verify-append-lock.mjs` | 10 项通过（并发追加按路径串行 + 回读校验） |
-| `tools/verify-git-sync.mjs` | 48 项通过（提交信息 / 命令序列 / 失败分支 / 两条路的接线 / 破坏性命令不变量 / 沙箱策略挂载） |
+| `tools/verify-git-sync.mjs` | 55 项通过（提交信息 / 命令序列与 lane / 失败分支 / 两条路的接线 / 破坏性命令不变量 / 沙箱两腿模式） |
 
 工具目录里只有这两套，无需排除任何套件。
 
@@ -47,8 +47,9 @@ CI 用 Node 20/22/24 三档矩阵、windows-latest。
 两个套件都能对着**改动前**的 `index.js` 复现失败（用 `DNC_INDEX` 指过去即可）：
 
 ```bash
-node tools/make-unwired-variant.mjs index.js /tmp/unwired.js            # 摘掉同步接线 → 9 条 FAIL
-node tools/make-unwired-variant.mjs index.js /tmp/nopolicy.js policy    # 摘掉沙箱策略 → 2 条 FAIL
+node tools/make-unwired-variant.mjs index.js /tmp/unwired.js          # 摘掉同步接线 → 14 条 FAIL
+node tools/make-unwired-variant.mjs index.js /tmp/nopolicy.js policy   # 摘掉沙箱策略   → 4 条 FAIL
+node tools/make-unwired-variant.mjs index.js /tmp/nonet.js    network  # 网络腿退回受限 → 2 条 FAIL
 DNC_INDEX=/tmp/unwired.js node tools/verify-git-sync.mjs
 ```
 
@@ -83,15 +84,20 @@ git -c core.quotepath=false -C "<vault>" push
 
 > 为什么必须做在插件里：兜底存根那条路**不经过 agent**，只靠 vault 的 `AGENTS.md` 约定是管不到它的。
 
-### 必须显式带沙箱策略（v1.6.1 修，端到端才暴露）
+### 沙箱两条腿：write 与 network（v1.6.1 + v1.6.2 修，都是端到端才暴露）
 
-shell 里跑 git **必须**带上 `{ mode: 'workspace-write', workspaceRoot: <vault 的 realpath> }`：
+shell 里跑 git **必须显式带沙箱策略**，而且**走网络的那两手与非网络那三手用的是不同模式**：
 
 ```js
-shell.resolve({ command, workdir: vault, timeoutMs, stdoutMaxBytes, sandboxPolicy: vaultSandboxPolicy(vault) })
+// add / commit / rev-parse —— 只把 vault 划成可写
+shell.resolve({ command, workdir: vault, timeoutMs, stdoutMaxBytes,
+  sandboxPolicy: { mode: 'workspace-write', workspaceRoot: realpathSync.native(vault) } })
+
+// push / pull --rebase —— 只能非受限
+sandboxPolicy: { mode: 'danger-full-access' }
 ```
 
-原因：`ctx.sandboxPolicy.resolve()` 的 `workspaceRoot` **只从 session 取**
+**为什么 write 腿要自己给策略**：`ctx.sandboxPolicy.resolve()` 的 `workspaceRoot` **只从 session 取**
 （`session?.header.cwd ?? this.workspaceRoot`，见 `@deepseek-ai/dsh-sandbox-policy`），而 vault 在会话工作区**之外**
 ⇒ 不带策略就按会话策略（对 vault 而言只读）执行，`git add` 连锁文件都建不出来。v1.6.0 实测原话：
 
@@ -99,15 +105,26 @@ shell.resolve({ command, workdir: vault, timeoutMs, stdoutMaxBytes, sandboxPolic
 fatal: Unable to create 'D:/DeepSeek/vault/.git/index.lock': Permission denied
 ```
 
+**为什么 network 腿不能沿用 workspace-write**：Windows 沙箱在受限模式下**不允许创建管道**，而 git 的 HTTPS
+传输必须给 `git-remote-https` 开一条 stdin 管道 ⇒ 受限模式里 push 必然失败。v1.6.1 实测原话：
+
+```
+error: cannot create standard input pipe for remote-https: Permission denied
+```
+
+pwsh-sandbox 见 `mode === 'danger-full-access'` 直接 `return super.run(spec)`、整个跳过 `confine()`，所以这一腿能通。
+**这是本插件唯一一处权限放宽**，代价可控的理由：命令是插件自己拼的固定形状（只有 `push` / `pull --rebase`）、
+workdir 锁在 vault、不接受调用方传入任意命令；`add`/`commit` 仍然只给 vault 可写。
+
 三个容易误判的点：
 
-1. **`git log` 能跑不代表写能跑** —— 路由一直在跑 `git log`，纯只读，只读永远不受限。这个 bug 是"端到端第一次
-   真实写入"才炸出来的，离线套件与 CI 全绿照样漏。所以套件第 5 节现在断言"策略挂在 spec 上"，
+1. **`git log` 能跑不代表写能跑** —— 路由一直在跑 `git log`，纯只读，只读永远不受限。这两个 bug 都是"端到端
+   第一次真实写入"才炸出来的，离线套件与 CI 全绿照样漏。所以套件第 5 节断言的是"策略挂在 spec 上、且分腿正确"，
    而不是只看 command 字符串。
 2. **`workspaceRoot` 要取 realpath**（`realpathSync.native`，失败回退原值）—— 它是 Windows ACL 授权的依据，
    软链接/junction 下不取 realpath 会授权到错的目录。
-3. **只划 vault 为可写**，不改成 `danger-full-access`：与插件写盘那条路（`fsService.writeText` 传
-   `{ mode:'workspace-write', workspaceRoot: vault }`）同一口径，narrowest-that-works。
+3. **别顺手把整条同步都放到 danger-full-access**：能窄就窄。写盘那条路（`fsService.writeText`）用的也是
+   `{ mode:'workspace-write', workspaceRoot: vault }`，narrowest-that-works。
 
 ## 安装
 
@@ -290,6 +307,14 @@ v1.5.0 给了一条**不依赖 vault** 的引导，按优先级取第一个非�
 
 完整历史见 `git log`；下面只记**行为会变**的节点。
 
+- **v1.6.2**：修 v1.6.1 剩下的第二条腿。重启后第二次真实写入，`add`/`commit` **过了**（本地提交 `9c358ae` 已产生），
+  push 报新错：`error: cannot create standard input pipe for remote-https: Permission denied`
+  —— Windows 沙箱受限模式不允许建管道，而 git 的 HTTPS 传输必须给 `git-remote-https` 开一条 stdin 管道。
+  修法：**分两条腿**。`push` / `pull --rebase` 走 `{ mode:'danger-full-access' }`（pwsh-sandbox 见此模式整个跳过
+  `confine()`），`add` / `commit` / `rev-parse` 仍是 `{ mode:'workspace-write', workspaceRoot: vault realpath }`。
+  lane 由 `syncAfterWrite` 显式传给注入的 `runGit`，不靠实现方猜命令内容。
+  同一次也验证了作用域不变量在真机上成立：用户另一份未提交的改动（`2026-09-17.md`）**没有被扫进提交**。
+  套件补到 55 项（新增 lane 断言 + 网络腿模式断言），A/B 变体加第三种 `network`。
 - **v1.6.1**：修 v1.6.0 的**沙箱漏配置**。重启后第一次真实写入就炸：
   `已写入 2 条要点…（未同步：git add 失败：fatal: Unable to create 'D:/DeepSeek/vault/.git/index.lock': Permission denied）`
   —— 写盘成功（设计上同步失败不吞内容，附注如实报因），但同步跑不起来。
