@@ -7,7 +7,8 @@
 > **上半只读、下半会写。** 列改动历史那一半是纯只读的；但本插件还登记了一个 `vault_note_append` 工具，
 > 并有一条「会话结束」后的兜底写入 —— 两者都只**追加**到 `00-收件箱/日记/<日期>.md`，并且统一由
 > `00-索引/插件设置.md` 里的 `autoWriteOnSessionEnd` 开关控制（关掉 ⇒ 一条都不写）。
-> 插件自己**不会** `git add` / commit / push；提交仍由你和 vault 的 `AGENTS.md` 约定负责。
+> **v1.6.0 起，两条写入选路写完就 `git add <那一个文件>` → `commit` → `push`**（见下面「写完即同步」）——
+> 所以没提交导致「抽屉空白 / 换机器丢内容」这件事，不再依赖 agent 记性。
 
 ## 界面
 
@@ -37,8 +38,48 @@ CI 用 Node 20/22/24 三档矩阵、windows-latest。
 | 套件 | 本机结果 |
 | --- | --- |
 | `tools/verify-append-lock.mjs` | 10 项通过（并发追加按路径串行 + 回读校验） |
+| `tools/verify-git-sync.mjs` | 44 项通过（提交信息 / 命令序列 / 失败分支 / 两条路的接线 / 破坏性命令不变量） |
 
-工具目录里只有这一套，无需排除任何套件。
+工具目录里只有这两套，无需排除任何套件。
+
+### A/B 反向验证
+
+两个套件都能对着**改动前**的 `index.js` 复现失败（用 `DNC_INDEX` 指过去即可）：
+
+```bash
+node tools/make-unwired-variant.mjs index.js /tmp/unwired.js   # 生成「摘掉同步接线」的变体
+DNC_INDEX=/tmp/unwired.js node tools/verify-git-sync.mjs       # 应当 6 条 FAIL
+```
+
+`make-unwired-variant.mjs` 只为这件事存在，不是套件（`run-all` 的登记检查不认它）。
+**它自己踩过一次坑**：第一版把锚点换成 `return '' || await syncAfterWrite({` —— `''` 是假值，
+`||` 继续求值，接线根本没摘掉，变体照样全绿 ⇒ 假阳性。摘接线必须整段替换成常量。
+同一次还暴露出套件本身的问题：断言里直接下标取数组，摘掉接线后会抛 `TypeError` 把后面所有断言
+连同汇总行一起吞掉；现在下标一律先兜底成空串。
+
+## 写完即同步（v1.6.0）
+
+用户明令（2026-09-20）：**每次写入都 commit + push，换设备只需要 `git pull`**。
+两条写入选路（`vault_note_append`、idle 兜底）都会在落盘成功后立刻跑：
+
+```bash
+git -c core.quotepath=false -C "<vault>" add -- "<刚写的那个文件>"
+git -c core.quotepath=false -C "<vault>" commit -m "日记 <日期> 要点：<标题>"
+git -c core.quotepath=false -C "<vault>" push
+```
+
+三条设计约束（都不是随手写的）：
+
+1. **只 add 本次写的那一个文件**，不用 `git add -A`。同一时刻可能有两个写入者（你自己也在编辑笔记），
+   `-A` 会把人家没写完的东西一起提交并推上去。套件里有一条不变量断言专门钉这个。
+2. **同步失败绝不吞掉已写内容**。写盘成功就是成功，同步问题只作为**附注**拼在回执后面，
+   `syncAfterWrite()` 永不抛出。你会看到这类回执：
+   `已写入 3 条要点到 …（已提交并推送）` / `（无改动，无需提交）` / `（未同步：vault 不是 git 仓库）` /
+   `（已本地提交，但推送失败：…）`。
+3. **push 被拒（另一台机器推过）先 `pull --rebase` 再重推一次**；rebase 出冲突或仍失败就**停手报人** ——
+   绝不 `--force`、不删远端分支、不 `--no-verify`。套件第 4 节断言全部命令里不出现这些破坏性手段。
+
+> 为什么必须做在插件里：兜底存根那条路**不经过 agent**，只靠 vault 的 `AGENTS.md` 约定是管不到它的。
 
 ## 安装
 
@@ -221,6 +262,12 @@ v1.5.0 给了一条**不依赖 vault** 的引导，按优先级取第一个非�
 
 完整历史见 `git log`；下面只记**行为会变**的节点。
 
+- **v1.6.0**：**写完即 commit + push**。两条写入选路（`vault_note_append` 工具、idle 兜底存根）落盘成功后
+  立刻 `git add <那一个文件>` → `commit` → `push`，目标是「换设备只需要 `git pull`」。
+  此前规则只写在 vault 的 `AGENTS.md` 里（靠 agent 记性），而**兜底存根不经过 agent**，那条路永远是
+  "写了没提交" —— 既进不了右侧抽屉（抽屉读 `git log`），也上不了 GitHub。
+  只 add 本次写的那一个文件；同步失败只作附注、绝不吞掉已写内容；push 被拒先 `pull --rebase` 重推一次，
+  仍失败停手报人（不 `--force`）。新增 `tools/verify-git-sync.mjs`（44 项）+ `make-unwired-variant.mjs` 做 A/B。
 - **v1.5.2**：修**并发追加丢记录**。本插件的写入全是"读全文 → 改一处 → 写回全文"的形状，
   两个并发调用（同时写日记、或设置页连点两下）各读各的旧内容时，后写的那次会把先写的**整段覆盖**掉，
   而且两次都返回成功 —— 用户只看到记录莫名少一条，没有任何报错。现在按路径串行（`withWriteLock`，

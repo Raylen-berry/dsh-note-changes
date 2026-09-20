@@ -389,6 +389,85 @@ export function buildStubEntry(now, sessionId) {
     + '- 这个会话这一轮有工作，但没写入要点（DSH 兜底）。会话 ' + shortSession(sessionId) + '\n'
 }
 
+// ------------------------------------------------- 写完即同步（v1.6.0）
+// 用户明令（2026-09-20）：每次写入都 commit + push，这样换设备只需要 `git pull`。
+//
+// 为什么不就是一句 `git add -A && git commit -m x && git push`：
+//   1. 只 add 本次写的**那一个**文件 —— 同一时刻可能有两个写入者（用户自己也在编辑笔记），
+//      `git add -A` 会把人家没写完的东西一起提交并推上去。
+//   2. 同步失败**绝不能**把已经落盘的内容变成"没写"：写盘成功就是成功，
+//      同步问题只作为附注回报（见 syncAfterWrite 的返回值约定）。
+//   3. push 被拒 = 另一台机器推过 ⇒ 先 `pull --rebase` 再重推一次；仍失败就停手报人，
+//      绝不 `--force`、不删远端分支、不 `--no-verify`。
+const SYNC_TITLE_MAX = 60
+
+/** 提交信息：单行、带日期、剔掉会打乱 shell 引号的字符。 */
+export function buildSyncMessage(purpose, date, title) {
+  let extra = String(title == null ? '' : title)
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/["`$\\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (extra.length > SYNC_TITLE_MAX) extra = extra.slice(0, SYNC_TITLE_MAX)
+  const kind = purpose === 'stub' ? '兜底存根（DSH 自动）' : '要点'
+  return '日记 ' + String(date) + ' ' + kind + (extra.length > 0 ? '：' + extra : '')
+}
+
+/** git 失败时能给人看的那一句（stderr 优先，退回 stdout，再退回退出码）。 */
+export function gitDetail(result) {
+  if (!result) return '未拿到结果'
+  const err = String(result.stderr || '').trim()
+  const out = String(result.stdout || '').trim()
+  const raw = err.length > 0 ? err : out
+  return raw.length > 0 ? raw.replace(/\s+/g, ' ').slice(0, 300) : ('git 退出码 ' + String(result.code))
+}
+
+/** push 被拒（远端有新提交）的判据。 */
+export function isPushRejected(detail) {
+  return /non-fast-forward|fetch first|\[rejected\]|behind the remote|tip of your current branch is behind/i
+    .test(String(detail == null ? '' : detail))
+}
+
+/**
+ * 把刚写完的文件提交并推送。**永不抛出**，返回值是拼在回执后面的附注：
+ *   '，已提交并推送' / '，已提交并推送（先 rebase）' / '（无改动，无需提交）' / '（未同步：…）'
+ *   / '（已本地提交，但推送失败：…）'
+ * runGit(args, timeoutMs) -> { code, stdout, stderr }，由调用方注入：真机走 Host 的 shell 服务，
+ * 测试走桩（这样命令序列本身能被离线断言）。args 各项是**已做引号处理的 shell 片段**。
+ */
+export async function syncAfterWrite({ runGit, rel, message }) {
+  const note = (why) => '（' + why + '）'
+  if (typeof runGit !== 'function') return note('未同步：没有可用的 git 执行器')
+  try {
+    const inside = await runGit(['rev-parse', '--is-inside-work-tree'], 20000)
+    if (!inside || inside.code !== 0) return note('未同步：vault 不是 git 仓库')
+
+    const add = await runGit(['add', '--', '"' + rel + '"'], 20000)
+    if (!add || add.code !== 0) return note('未同步：git add 失败：' + gitDetail(add))
+
+    const commit = await runGit(['commit', '-m', '"' + message + '"'], 20000)
+    if (!commit || commit.code !== 0) {
+      if (/nothing to commit|no changes added/i.test(gitDetail(commit))) return note('无改动，无需提交')
+      return note('已写入，但提交失败：' + gitDetail(commit))
+    }
+
+    let push = await runGit(['push'], 60000)
+    if (push && push.code === 0) return '，已提交并推送'
+
+    if (isPushRejected(gitDetail(push))) {
+      const pull = await runGit(['pull', '--rebase'], 60000)
+      if (!pull || pull.code !== 0) {
+        return note('已本地提交，但推送被拒且 rebase 失败，需人工处理：' + gitDetail(pull))
+      }
+      push = await runGit(['push'], 60000)
+      if (push && push.code === 0) return '，已提交并推送（先 rebase）'
+    }
+    return note('已本地提交，但推送失败：' + gitDetail(push))
+  } catch (error) {
+    return note('同步出错：' + ((error && error.message) ? error.message : String(error)))
+  }
+}
+
 /**
  * 注册日志路由。webServer 不存在就只记一条错误，不抛异常
  * （抛了会让整个 profile 的 compose 失败，代价太大）。
@@ -456,6 +535,36 @@ export async function apply(ctx) {
     return picked
   }
 
+  /**
+   * 在 vault 目录里跑一条 git（真机实现）。args 各项是**已做引号处理的 shell 片段**。
+   * 与 /note-changes/log 路由共用同一个 shell 服务 ⇒ 沙箱与权限行为一致，不另开一条口子。
+   */
+  async function runGitIn(vault, args, timeoutMs) {
+    const shell = ctx.get('shell')
+    if (shell === undefined) throw new Error('Host 未提供 shell 服务')
+    const spec = shell.resolve({
+      command: 'git -c core.quotepath=false -C "' + vault + '" ' + args.join(' '),
+      workdir: vault,
+      timeoutMs,
+      stdoutMaxBytes: 200000,
+    })
+    const result = await shell.run(spec)
+    return {
+      code: result ? result.exitCode : null,
+      stdout: result && result.stdout ? String(result.stdout.text || '') : '',
+      stderr: result && result.stderr ? String(result.stderr.text || '') : '',
+    }
+  }
+
+  /** 写完一个文件后立刻提交推送；附注（成功或失败原因）交给调用方回报，永不抛。 */
+  async function syncWrittenFile(vault, rel, message) {
+    return await syncAfterWrite({
+      runGit: (args, timeoutMs) => runGitIn(vault, args, timeoutMs),
+      rel,
+      message,
+    })
+  }
+
   /** 兜底：这一轮做过事但 AI 没写要点时，补一条「待补充」存根。 */
   async function writeStubIfNeeded(sessionId) {
     try {
@@ -493,7 +602,9 @@ export async function apply(ctx) {
         { mode: 'workspace-write', workspaceRoot: vault },
       )
       stubState.stubDay[sessionId] = today
-      console.log('[dsh-note-changes] 已写兜底存根（' + decision.reason + '）')
+      // 兜底存根也走同一条同步：这条路径**不经过 agent**，不在这里提交就永远进不了抽屉、也上不了 GitHub。
+      const syncNote = await syncWrittenFile(vault, rel, buildSyncMessage('stub', today, ''))
+      console.log('[dsh-note-changes] 已写兜底存根（' + decision.reason + '）' + syncNote)
     } catch (error) {
       console.error('[dsh-note-changes] 兜底写入失败：'
         + ((error && error.message) ? error.message : String(error)))
@@ -839,9 +950,14 @@ export async function apply(ctx) {
           // 拿不到会话 id 就算了：兜底最多多写一条存根，不会丢东西
         }
 
+        const syncNote = await syncWrittenFile(
+          vault, rel, buildSyncMessage('points', date, args && args.title),
+        )
+
         return '已写入 ' + String(points.length) + ' 条要点到 ' + rel
           + '（' + appended.before + ' → ' + appended.after + ' 字符）'
           + '（' + (appended.existed ? '追加到已有文件' : '新建了当日记录') + '）'
+          + syncNote
       } catch (error) {
         const message = (error && error.message) ? error.message : String(error)
         return '没写：' + message
@@ -851,5 +967,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.5.2)')
+  console.log('[dsh-note-changes] host up (v1.6.0)')
 }

@@ -1086,6 +1086,8 @@ window.__ModuleLoader__.load({
           h('p', { className: 'dnc-p' },
             '上半是 vault 的 git 改动历史（只读，不提交、不推送）。'
             + '下半的两个开关控制**往本库写入**的行为：AI 收工写要点、以及兜底存根。'
+            + 'v1.6.0 起写入落盘后会立刻 git add + commit + push（只加刚写的那个文件），'
+            + '所以换设备只需要 git pull；推送失败不会丢内容，只会在回执里附一句原因。'
             + '这些开关存在 ', h('code', { className: 'dnc-code' }, '00-索引/插件设置.md'),
             ' 的 frontmatter 里，随 git 同步到每台设备。'
             + '输入框右侧的「笔记」chip 是同一组开关的快捷入口。'),
