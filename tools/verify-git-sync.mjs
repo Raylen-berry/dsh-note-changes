@@ -151,6 +151,7 @@ console.log('\n— 3. 接线：工具路径与兜底路径都真的发起同步 
 const registered = {}
 const handlers = {}
 const commands = []
+const specs = []
 const realSetTimeout = globalThis.setTimeout
 // 兜底的防抖是 3 分钟（避免每轮都写存根），测试里把它压到 5ms —— 否则本套件要跑 3 分钟。
 globalThis.setTimeout = (fn, ms, ...rest) => realSetTimeout(fn, ms >= 1000 ? 5 : ms, ...rest)
@@ -172,7 +173,11 @@ const ctx = {
     if (name === 'shell') {
       return {
         resolve: (spec) => spec,
-        run: async (spec) => { commands.push(String(spec.command)); return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } } },
+        run: async (spec) => {
+          commands.push(String(spec.command))
+          specs.push(spec)   // 整条 spec 留档：沙箱策略挂在 spec 上，只看 command 断言不到它
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        },
       }
     }
     if (name === 'agents') {
@@ -238,6 +243,25 @@ ok('没有 add -A / add --all（否则会把用户正在写的东西一起推上
   !/\sadd\s+(-A|--all)\b/.test(joined))
 ok('没有 rm / clean -fd 这类删除', !/\brm\s+-|\bclean\s+-[a-z]*d/.test(joined))
 ok('所有 git 命令都在 vault 目录里跑（-C 或 workdir 约束）', !/\bgit\b/.test(joined.replace(/git -c core\.quotepath=false -C "[^"]*"/g, '')))
+
+// ───────────────────────────────────────────── 5. 沙箱策略必须挂上（v1.6.1）
+// 现场：v1.6.0 端到端第一次真实写入，写盘成功但 `git add` 报
+//   fatal: Unable to create 'D:/DeepSeek/vault/.git/index.lock': Permission denied
+// 根因：`ctx.sandboxPolicy.resolve()` 的 workspaceRoot 只从 session 取，vault 在会话工作区外
+// ⇒ shell 里的 git 被按只读执行。修法 = 每次调用显式带上 { mode:'workspace-write', workspaceRoot: vault }。
+// 因此这里断言"策略挂在 spec 上"，而不是只看 command —— 只看 command 的话这个 bug 全套件都测不出来。
+console.log('\n— 5. 沙箱策略：只把 vault 划成可写 —')
+ok('确实抓到了 shell 调用（否则下面的 every 是空真）', specs.length > 0 && specs.length === commands.length,
+  specs.length + ' 条 spec / ' + commands.length + ' 条命令')
+const VAULT_REAL = fs.realpathSync.native(VAULT)
+ok('每条 git 调用都显式带沙箱策略，且模式是 workspace-write',
+  specs.length > 0 && specs.every((s) => s.sandboxPolicy && s.sandboxPolicy.mode === 'workspace-write'),
+  specs.map((s) => (s.sandboxPolicy || {}).mode || '(无)').join(','))
+ok('策略的 workspaceRoot 指向 vault 的 realpath（ACL 授权的依据，必须取 realpath）',
+  specs.length > 0 && specs.every((s) => s.sandboxPolicy && s.sandboxPolicy.workspaceRoot === VAULT_REAL),
+  (specs[0] && specs[0].sandboxPolicy ? specs[0].sandboxPolicy.workspaceRoot : '(无)') + ' vs ' + VAULT_REAL)
+ok('没有把策略放宽成 danger-full-access / read-only',
+  specs.every((s) => !s.sandboxPolicy || (s.sandboxPolicy.mode !== 'danger-full-access' && s.sandboxPolicy.mode !== 'read-only')))
 
 globalThis.setTimeout = realSetTimeout
 rmSync(ROOT, { recursive: true, force: true })
