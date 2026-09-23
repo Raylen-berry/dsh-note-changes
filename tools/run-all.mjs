@@ -22,6 +22,7 @@ const CHECKS = []
 const SUITES = [
   'tools/verify-append-lock.mjs',
   'tools/verify-git-sync.mjs',
+  'tools/verify-note-changes-routes.mjs',
 ]
 
 const EXCLUDED = []

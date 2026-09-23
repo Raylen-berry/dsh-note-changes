@@ -9,6 +9,11 @@
 > `00-索引/插件设置.md` 里的 `autoWriteOnSessionEnd` 开关控制（关掉 ⇒ 一条都不写）。
 > **v1.6.0 起，两条写入选路写完就 `git add <那一个文件>` → `commit` → `push`**（见下面「写完即同步」）——
 > 所以没提交导致「抽屉空白 / 换机器丢内容」这件事，不再依赖 agent 记性。
+>
+> **v1.7.0 补上三件事**：① push 失败后能**手动重试**（设置页与 chip 浮层里的「重试同步」，
+> 只重推、不重提交）；② 同步回执留在内存里、设置页看得到（此前失败只写在工具回执里，回执滚走就没人看见）；
+> ③ 新增**只读**工具 `vault_note_search`，让 AI 在写要点前能先查自己记过什么 —— 「同类型的坑并入既有条目」
+> 这条规矩，此前只能靠猜。
 
 ## 界面
 
@@ -19,6 +24,16 @@
 | 输入框右侧 chip「笔记」 | `conversation.input.right`（order 205） | 点开是浮层，里面是两个开关（`scanVault` / `autoWriteOnSessionEnd`） |
 
 三处共用同一份数据源（Host 的 `/note-changes/*` 路由）。
+
+v1.7.0 在抽屉里加了三样：**过滤框**（标题 / 日期 / 作者 / 文件名，边打边筛）、
+笔记正文右上角的**「复制路径」**（到 Obsidian 里 Ctrl+O 粘贴即可打开）、
+以及设置页 / chip 浮层里的**同步回执行 +「重试同步」按钮**。
+
+> **为什么不是「在 Obsidian 里打开」的外链**：一开始写的就是 `obsidian://open?vault=…&file=…`，
+> 真机上点了**毫无反应** —— 桌面版 `secureWindow()` 的 `setWindowOpenHandler` 只对 `http/https`
+> 调 `shell.openExternal`，其余一律 `deny`（实测 `window.open('obsidian://…')` 返回 `null`、新标签页不出现）。
+> 而且这台机器**没装 Obsidian**、`HKCU\Software\Classes\obsidian` 也没有（协议根本没人接管）。
+> 死按钮不算功能，就换成"复制路径"这个当场能验证的动作。
 
 ## 发布前检查（CI 与本地同一条命令）
 
@@ -37,14 +52,17 @@ CI 用 Node 20/22/24 三档矩阵、windows-latest。
 
 | 套件 | 本机结果 |
 | --- | --- |
-| `tools/verify-append-lock.mjs` | 10 项通过（并发追加按路径串行 + 回读校验） |
+| `tools/verify-append-lock.mjs` | 12 项通过（并发追加按路径串行 + 回读校验 + 版本号一致） |
 | `tools/verify-git-sync.mjs` | 55 项通过（提交信息 / 命令序列与 lane / 失败分支 / 两条路的接线 / 破坏性命令不变量 / 沙箱两腿模式） |
+| `tools/verify-note-changes-routes.mjs` | 75 项通过（四条路由 rip 出来直接调 + 两条工具的 schema 与行为 + 回执留存 + client 半 internals 与 host 的 `ROUTES` 对齐 + 三处版本号一致） |
 
-工具目录里只有这两套，无需排除任何套件。
+工具目录里只有这三套，无需排除任何套件。
 
 ### A/B 反向验证
 
-两个套件都能对着**改动前**的 `index.js` 复现失败（用 `DNC_INDEX` 指过去即可）：
+三套里的前两套都能对着**改动前**的 `index.js` 复现失败（用 `DNC_INDEX` 指过去即可）；
+`verify-note-changes-routes.mjs` 也认 `DNC_INDEX` / `DNC_CLIENT`，对着 v1.6.x 跑会看到
+sync / lastSync / search / 版本闸门那几节全 FAIL：
 
 ```bash
 node tools/make-unwired-variant.mjs index.js /tmp/unwired.js          # 摘掉同步接线 → 14 条 FAIL
@@ -131,6 +149,35 @@ workdir 锁在 vault、不接受调用方传入任意命令；`add`/`commit` 仍
 3. **别顺手把整条同步都放到 danger-full-access**：能窄就窄。写盘那条路（`fsService.writeText`）用的也是
    `{ mode:'workspace-write', workspaceRoot: vault }`，narrowest-that-works。
 
+## 推送失败之后：重试同步（v1.7.0）
+
+`push` 失败时内容**只是停在本地**（本地提交已经产生了），此前唯一的补救办法是自己在 vault 里敲一条 push。
+现在多一条路：设置页 / chip 浮层里的**「重试同步」**，打 `POST /note-changes/sync`，命令序列就是一条：
+
+```
+git -c core.quotepath=false -C "<vault>" push          # 被拒时 → pull --rebase → 再 push 一次
+```
+
+三个刻意的设计：
+
+1. **只重推，不重提交。** 没碰 `syncAfterWrite`，因为它在这个场景下根本走不到 push ——
+   工作区没有新改动时它在那之前就返回「无改动，无需提交」。所以重试走独立路由，命令里不含 `add` / `commit`
+   （套件断言命令序列恰好是 `["push"]`）。回执也跟着改口径：这条路上说的是**「已推送到远端」**、
+   不是 `syncAfterWrite` 那句「已提交并推送」—— 后者在重试路上一个字都没提交，照抄会让人以为又产生了一条新提交。
+2. **回执留在 Host 内存里**（`lastSync`）。此前失败只写在工具回执里，回执随着对话滚走就再也看不见了；
+   现在写盘后的自动同步、以及这条重试，都会更新同一个字段，并由 `settings` 路由带回前端。
+   Host 重启即清空 —— 前端对 `null` 有明确的显示分支（"本次运行还没有同步回执"），不显示成空白。
+3. **同一把梯子解析 vault**（显式参数 > `DNC_VAULT` > 指针文件 > 默认值），沙箱泳道跟自动同步一样：
+   `push` / `pull --rebase` 走 network 腿，其余一律不出现。
+
+> **时间戳必须转本地时区。** Host 给的是 `new Date().toISOString()`（UTC），前端第一版直接
+> `String(at).slice(5, 16).replace('T', ' ')` 截字符串 —— 真机上显示 `09-23 04:03`，而当时本地是 `12:03`
+> （实测差 8 小时）。现在走 `new Date(iso)` + 本地 getter 拼 `MM-DD HH:mm`，解析不了的串才退回截断。
+> 这类"把 ISO 串切一段当本地时间"的写法在别处也别用。
+
+> 回执用 `'，'` 开头表示成功、`'（…）'` 表示失败 —— 这个约定是从 `syncAfterWrite` 的字符串返回值**沿用**的。
+> 没有为了"更干净"去改它的返回形状：那个形状已被 `tools/verify-git-sync.mjs` 钉死，改了会把 55 项断言一起掀翻。
+
 ## 安装
 
 ```powershell
@@ -187,6 +234,25 @@ git -c core.quotepath=false -C "<vault>" log -n 80 --date=short --name-only
 **记录口径**（写在 `vault_note_append` 的工具描述里，AI 每次调用都会看到）：踩过的坑如果库里已有
 **同类型**条目，就**并入那一条**、不重复新开；并且要写明**出现场景**（什么操作、什么环境下会撞上）——
 没有场景的坑记下次认不出来，等于没记。这条与 vault 自己 `AGENTS.md` §0.4「新坑按品类写进对应笔记」同向。
+
+### 查过再写：`vault_note_search`（v1.7.0）
+
+上面那条「并入既有条目」的规矩有个前提：写要点的人得**看得见自己以前写过什么**。AI 看不到 ——
+没有读路的后果就是同一个坑反复新开条目，而"并入"这条规矩只能靠猜。于是补一条**只读**工具：
+
+```
+git -c core.quotepath=false -C "<vault>" grep -n -i -e "<关键词>" -- "00-收件箱/日记"
+```
+
+| 项 | 值 |
+| --- | --- |
+| 参数 | `query`（必填，忽略大小写，按普通串处理）、`limit`（默认 30、上限 100）、`vault`（可选） |
+| 返回 | `命中 N 行：` + 每行 `文件:行号:内容`；无命中时 `没找到含「…」的日记条目` |
+| 写盘 | **一次都不写**。`git grep` 只读，且天然只搜 git 跟踪的笔记（未提交草稿不进结果） |
+
+为什么用 `git grep` 而不是在 Node 里递归目录：不用引新的 `fs` API、不用自己判忽略规则、
+也不用担心 vault 里有几万篇笔记时的遍历成本 —— 索引这件事 git 已经在做了。
+退出码 1 是 `git grep` 的"没命中"，与真故障分开报（套件里这两种都断言了）。
 
 ## 两个实现上的取舍（都是踩坑换来的）
 
@@ -307,11 +373,33 @@ v1.5.0 给了一条**不依赖 vault** 的引导，按优先级取第一个非�
 | 开关点了没反应 | 组件是否漏了 `useVersion()` 订阅（见上面「取舍 4」） |
 | 换机器后抽屉空白 / 工具报「解析不出 vault 路径」 | 第 1 档没给路径：写指针文件或设 `DNC_VAULT`（见「安装 · 再告诉插件你的 vault 在哪」）；vault 里那个 `vault:` 是从别的机器同步来的，多半还指着上一台的路径 |
 | 所有会话都报 400 / 工具全挂 | `vault_note_append` 的 schema 是否被改成了非标准形状（见下面 v1.4.1） |
+| client 半是新的、但「重试同步」报错 / 设置页看不到回执 | Host 半没重启。**client 半刷新页面即生效，Host 半（index.js）必须重启 DSH Desktop** —— 新路由与 `lastSync` 都在 Host 半 |
+| 「重试同步」回 `{"ok":false,"error":"只接受 POST"}` | 有东西用 GET 打这条路由（浏览器直接开 URL 就会这样）。它必须有副作用，所以拒 GET |
+| 笔记里的外链（`obsidian://`、`vscode://` 之类）点了没反应 | 桌面版故意的：`secureWindow` 的 `setWindowOpenHandler` 只对 `http/https` 调 `shell.openExternal`，其余 `deny`。想要这类跳转，只能由 Host 半去 `shell.openExternal`（本插件没做） |
 
 ## 版本
 
 完整历史见 `git log`；下面只记**行为会变**的节点。
 
+- **v1.7.0**：三件补强 + 一轮瘦身。
+  ① **重试同步**：`POST /note-changes/sync`，把本地已有的提交再推一次（被拒则 `pull --rebase` 后重推），
+  命令序列恰好一条 `push`、不含 `add`/`commit`。`pushWithRebase()` 从 `syncAfterWrite` 里抽出来复用，
+  两条路的失败文案完全一致（含「需人工处理」那句）；成功文案分开 —— 这条路说「已推送到远端」，
+  不说「已提交并推送」（它一个提交都没建）。
+  ② **同步回执 `lastSync`**：写盘后的自动同步与手动重试都更新它，`settings` 路由带回前端，
+  设置页与 chip 浮层显示「上次同步 成功/失败 · 时间 · 原因」并给一个「重试同步」按钮。
+  此前 push 失败只体现在工具回执里，回执滚走了就没人知道内容还停在本地。
+  回执时间从 UTC 截串改成按本地时区格式化（真机实测显示差 8 小时：`…T04:03Z` 显示成 04:03，本地是 12:03）。
+  ③ **`vault_note_search`（只读）**：`git grep -n -i -e "<词>" -- "00-收件箱/日记"`，返回 `文件:行号:内容`；
+  退出码 1 当"没命中"而非故障。补的是「同类型的坑并入既有条目」缺少读路的洞。
+  界面另加：抽屉**过滤框**（标题/日期/作者/文件名）、笔记正文右上角**「复制路径」**
+  （原本做的是 `obsidian://` 外链，真机点了没反应：桌面版 `secureWindow` 只放行 `http/https` 的
+  `window.open`，本机也没装 Obsidian ⇒ 换成当场可验证的复制动作）。
+  瘦身部分：`parseLog` 去掉没人读的 `email`、新增 `queryParam` 复用给三条路由、client 的
+  `applySettingsBody`/`failSettings` 由读与写共用；同时修掉一个**盘上写成功、回执却报 `after is not defined`**
+  的 settings POST 缺陷（`after` 曾声明在 `withWriteLock` 回调内）。套件从 2 套 67 项增到 3 套 142 项：
+  新增 `tools/verify-note-changes-routes.mjs`（路由 handler 直接调 + 两条工具行为 + 回执留存 +
+  client `internals` 与 host `ROUTES` 对齐 + **三处版本号一致**的闸门）。
 - **v1.6.2**：修 v1.6.1 剩下的第二条腿。重启后第二次真实写入，`add`/`commit` **过了**（本地提交 `9c358ae` 已产生），
   push 报新错：`error: cannot create standard input pipe for remote-https: Permission denied`
   —— Windows 沙箱受限模式不允许建管道，而 git 的 HTTPS 传输必须给 `git-remote-https` 开一条 stdin 管道。

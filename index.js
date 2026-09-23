@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.1.0)
+// dsh-note-changes · Host half (v1.7.0)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -43,6 +43,15 @@ const MAX_NOTE_CHARS = 60000
 /** 插件设置：读写 vault 里这个文件的 frontmatter。 */
 const SETTINGS_PATH = '/note-changes/settings'
 const SETTINGS_REL = '00-索引/插件设置.md'
+
+/** 重试同步的路由（v1.7.0）：本地已有提交、只是当时 push 失败时，手动再推一次。 */
+const SYNC_PATH = '/note-changes/sync'
+
+/**
+ * 四条路由路径的单一真源。client 半各自硬编码了一份（两半独立打包，不能互相 import），
+ * 漂移由 tools/verify-note-changes-routes.mjs 的「client 常量 == ROUTES」断言拦住。
+ */
+export const ROUTES = { log: LOG_PATH, note: NOTE_PATH, settings: SETTINGS_PATH, sync: SYNC_PATH }
 
 /** 设置默认值（设置文件不存在或缺键时用）。 */
 const DEFAULT_SETTINGS = {
@@ -231,6 +240,15 @@ function readBody(req) {
 /** 一次最多返回多少条提交。 */
 const MAX_COMMITS = 80
 
+/**
+ * 取 URL 里的查询参数（已解码）。key 一律是本文件写死的字面量（vault / path），
+ * 所以拼进正则没有转义问题。解不开就按原样用：非法的 % 转义不该把整条路由打成 500。
+ */
+function queryParam(url, key) {
+  const raw = (String(url).match(new RegExp('[?&]' + key + '=([^&]*)')) || [])[1] || ''
+  try { return decodeURIComponent(raw) } catch (err) { return raw }
+}
+
 /** 返回 JSON 并结束响应。 */
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj)
@@ -267,14 +285,10 @@ export function parseLog(text) {
     if (!head) continue
 
     const authorLine = block.match(/^Author:\s*(.*)$/m)
-    const emailMatch = block.match(/^Author:.*<([^>]*)>/m)
     const dateMatch = block.match(/^Date:\s*(.*)$/m)
 
     const lines = block.split('\n')
-    let dateIndex = -1
-    for (let i = 0; i < lines.length; i++) {
-      if (/^Date:/.test(lines[i])) { dateIndex = i; break }
-    }
+    const dateIndex = lines.findIndex((line) => /^Date:/.test(line))
 
     // 缩进 >= 2 空格的非空行 = 提交标题/正文；顶格非空行 = 文件路径。
     const subjectLines = []
@@ -285,15 +299,11 @@ export function parseLog(text) {
       else if (/^\S/.test(line)) files.push(line.trim())
     }
 
-    const md = []
-    for (const file of files) {
-      if (/\.md$/i.test(file)) md.push(file)
-    }
+    const md = files.filter((file) => /\.md$/i.test(file))
 
     out.push({
       hash: head[1].slice(0, 8),
       author: authorLine ? String(authorLine[1]).replace(/<[^>]*>\s*$/, '').trim() : '',
-      email: emailMatch ? emailMatch[1] : '',
       date: dateMatch ? String(dateMatch[1]).trim() : '',
       subject: subjectLines.length > 0 ? subjectLines[0] : '(无标题)',
       files: md,
@@ -434,6 +444,33 @@ export function isPushRejected(detail) {
 }
 
 /**
+ * 把本地已有的提交推上去；被拒（远端有新提交）就先 `pull --rebase` 再重推一次。
+ * 与"写完即同步"分开的原因：这条**不碰工作区** —— 抽屉里那个提交早就形成了，只是当时
+ * 网络/沙箱让 push 失败（v1.6.x 的实测），事后重试不需要再 add/commit 一次。
+ * 返回 { ok, message }；ok=false 时 message 是能直接给人看的一句。**永不抛出**。
+ */
+export async function pushWithRebase(runGit) {
+  const fail = (why) => ({ ok: false, message: why })
+  if (typeof runGit !== 'function') return fail('未同步：没有可用的 git 执行器')
+  try {
+    let push = await runGit(['push'], 60000, LANE_NETWORK)
+    if (push && push.code === 0) return { ok: true, message: '已提交并推送' }
+
+    if (isPushRejected(gitDetail(push))) {
+      const pull = await runGit(['pull', '--rebase'], 60000, LANE_NETWORK)
+      if (!pull || pull.code !== 0) {
+        return fail('已本地提交，但推送被拒且 rebase 失败，需人工处理：' + gitDetail(pull))
+      }
+      push = await runGit(['push'], 60000, LANE_NETWORK)
+      if (push && push.code === 0) return { ok: true, message: '已提交并推送（先 rebase）' }
+    }
+    return fail('已本地提交，但推送失败：' + gitDetail(push))
+  } catch (error) {
+    return fail('同步出错：' + ((error && error.message) ? error.message : String(error)))
+  }
+}
+
+/**
  * 把刚写完的文件提交并推送。**永不抛出**，返回值是拼在回执后面的附注：
  *   '，已提交并推送' / '，已提交并推送（先 rebase）' / '（无改动，无需提交）' / '（未同步：…）'
  *   / '（已本地提交，但推送失败：…）'
@@ -456,18 +493,8 @@ export async function syncAfterWrite({ runGit, rel, message }) {
       return note('已写入，但提交失败：' + gitDetail(commit))
     }
 
-    let push = await runGit(['push'], 60000, LANE_NETWORK)
-    if (push && push.code === 0) return '，已提交并推送'
-
-    if (isPushRejected(gitDetail(push))) {
-      const pull = await runGit(['pull', '--rebase'], 60000, LANE_NETWORK)
-      if (!pull || pull.code !== 0) {
-        return note('已本地提交，但推送被拒且 rebase 失败，需人工处理：' + gitDetail(pull))
-      }
-      push = await runGit(['push'], 60000, LANE_NETWORK)
-      if (push && push.code === 0) return '，已提交并推送（先 rebase）'
-    }
-    return note('已本地提交，但推送失败：' + gitDetail(push))
+    const pushed = await pushWithRebase(runGit)
+    return pushed.ok ? '，' + pushed.message : note(pushed.message)
   } catch (error) {
     return note('同步出错：' + ((error && error.message) ? error.message : String(error)))
   }
@@ -596,13 +623,23 @@ export async function apply(ctx) {
     }
   }
 
+  /**
+   * 最近一次同步的回执（内存态，Host 重启即清空）。存在的理由：push 失败只写在工具回执里，
+   * 而回执随着对话滚走了 —— 设置页留一行，失败这件事在关掉抽屉之后还看得见、还能重试。
+   */
+  let lastSync = null
+
   /** 写完一个文件后立刻提交推送；附注（成功或失败原因）交给调用方回报，永不抛。 */
   async function syncWrittenFile(vault, rel, message) {
-    return await syncAfterWrite({
+    const note = await syncAfterWrite({
       runGit: (args, timeoutMs, lane) => runGitIn(vault, args, timeoutMs, lane),
       rel,
       message,
     })
+    // 成功回执以'，'开头，失败是'（…）'（见 syncAfterWrite 的返回值约定）。
+    // 用这个判据而不是改返回形状 —— 那个形状已被 tools/verify-git-sync.mjs 钉死。
+    lastSync = { at: new Date().toISOString(), vault, rel, ok: note.charAt(0) === '，', note }
+    return note
   }
 
   /** 兜底：这一轮做过事但 AI 没写要点时，补一条「待补充」存根。 */
@@ -689,10 +726,7 @@ export async function apply(ctx) {
     path: LOG_PATH,
     handler: async (req, res) => {
       try {
-        const url = String(req.url || '')
-        const raw = (url.match(/[?&]vault=([^&]*)/) || [])[1] || ''
-        let asked = raw
-        try { asked = decodeURIComponent(raw) } catch (err) { asked = raw }
+        const asked = queryParam(req.url, 'vault')
         const seed = await resolveVault(asked, ctx.get('fs'))
         const vault = seed.vault
 
@@ -748,13 +782,8 @@ export async function apply(ctx) {
     path: NOTE_PATH,
     handler: async (req, res) => {
       try {
-        const url = String(req.url || '')
-        const rawVault = (url.match(/[?&]vault=([^&]*)/) || [])[1] || ''
-        const rawPath = (url.match(/[?&]path=([^&]*)/) || [])[1] || ''
-        let askedVault = rawVault
-        let askedPath = rawPath
-        try { askedVault = decodeURIComponent(rawVault) } catch (err) { askedVault = rawVault }
-        try { askedPath = decodeURIComponent(rawPath) } catch (err) { askedPath = rawPath }
+        const askedVault = queryParam(req.url, 'vault')
+        const askedPath = queryParam(req.url, 'path')
 
         const seed = await resolveVault(askedVault, ctx.get('fs'))
         const vault = seed.vault
@@ -808,25 +837,23 @@ export async function apply(ctx) {
     path: SETTINGS_PATH,
     handler: async (req, res) => {
       try {
-        const url = String(req.url || '')
-        const rawVault = (url.match(/[?&]vault=([^&]*)/) || [])[1] || ''
-        let asked = rawVault
-        try { asked = decodeURIComponent(rawVault) } catch (err) { asked = rawVault }
+        const asked = queryParam(req.url, 'vault')
         const fsService = ctx.get('fs')
         if (fsService === undefined) {
           sendJson(res, 200, { ok: false, error: 'Host 未提供 fs 服务', settings: DEFAULT_SETTINGS })
           return
         }
         const seed = await resolveVault(asked, fsService)
-        const base = seed.vault
+        // seed.vault 已被 normalizeVaultPath 去过尾斜杠（pickVaultSeed 保证），拼接时不必再 replace 一遍。
+        const vault = seed.vault
 
-        const target = await fsService.resolve(base.replace(/\/+$/, '') + '/' + SETTINGS_REL)
+        const target = await fsService.resolve(vault + '/' + SETTINGS_REL)
 
         // ---- 读 ----
         if (String(req.method || 'GET').toUpperCase() !== 'POST') {
           const info = await fsService.stat(target)
           if (!info) {
-            sendJson(res, 200, { ok: true, exists: false, source: SETTINGS_REL, vaultSource: seed.source, vaultPath: base, settings: DEFAULT_SETTINGS })
+            sendJson(res, 200, { ok: true, exists: false, source: SETTINGS_REL, vaultSource: seed.source, vaultPath: vault, settings: DEFAULT_SETTINGS, lastSync })
             return
           }
           const text = String(await fsService.readText(target) || '')
@@ -835,8 +862,9 @@ export async function apply(ctx) {
             exists: true,
             source: SETTINGS_REL,
             vaultSource: seed.source,
-            vaultPath: base,
+            vaultPath: vault,
             settings: resolveSettings(parseFrontmatter(text)),
+            lastSync,
           })
           return
         }
@@ -860,18 +888,21 @@ export async function apply(ctx) {
         }
 
         // 与日记追加同类的"读-改-写"，同样要排队：设置页连点两下开关会并发两个 POST。
-        const settingsKey = base.replace(/\/+$/, '') + '/' + SETTINGS_REL
+        const settingsKey = vault + '/' + SETTINGS_REL
+        // after 必须在锁外声明：下面的回执要用它。写在锁里 ⇒ 回执拿到的是 ReferenceError，
+        // 于是"盘上写成功了、回执却报失败"（v1.6.2 的实测缺陷，路由级夹具抓到）。
+        let after = ''
         await withWriteLock(settingsKey, async function () {
           const info = await fsService.stat(target)
           const before = info ? String(await fsService.readText(target) || '') : ''
-          const after = patchFrontmatter(before, patch)
+          after = patchFrontmatter(before, patch)
 
           // vault 在工作区之外，默认策略会拒绝（实测报
           // 'file access denied under workspace-write mode'）。这里把沙箱范围显式收到
           // vault 目录本身 —— 最窄的可用策略：只放行这个 vault，别处照旧受限。
           await fsService.writeText(target, after, undefined, undefined, {
             mode: 'workspace-write',
-            workspaceRoot: base.replace(/\/+$/, ''),
+            workspaceRoot: vault,
           })
         })
 
@@ -879,15 +910,61 @@ export async function apply(ctx) {
           ok: true,
           source: SETTINGS_REL,
           vaultSource: seed.source,
-          vaultPath: base,
+          vaultPath: vault,
           wrote: Object.keys(patch),
           settings: resolveSettings(parseFrontmatter(after)),
+          lastSync,
         })
       } catch (err) {
         sendJson(res, 200, { ok: false, error: String((err && err.message) || err) })
       }
     },
   }), 'dsh-note-changes: settings route')
+
+  // 重试同步（v1.7.0）：写完即同步失败后（网络/沙箱，见 v1.6.x），提交已经躺在本地了，
+  // 这里只重推、不重提交。syncAfterWrite 顶不住这个场景 —— 没有新改动时它返回
+  // 「无改动，无需提交」并在那一步就 return，永远走不到 push。
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: SYNC_PATH,
+    handler: async (req, res) => {
+      try {
+        if (String(req.method || 'GET').toUpperCase() !== 'POST') {
+          sendJson(res, 200, { ok: false, error: '只接受 POST' })
+          return
+        }
+        const seed = await resolveVault(queryParam(req.url, 'vault'), ctx.get('fs'))
+        const vault = seed.vault
+        if (vault.length === 0) {
+          sendJson(res, 200, { ok: false, error: '解析不出 vault 路径' })
+          return
+        }
+        const pushed = await pushWithRebase((args, timeoutMs, lane) => runGitIn(vault, args, timeoutMs, lane))
+        // pushWithRebase 的回执是给"写完即同步"用的，那句「已提交并推送」在这条路上不成立
+        // —— 这里一个提交都没建。同一句复述搬到重试路上会让人以为又产生了一条新提交。
+        const message = pushed.ok
+          ? pushed.message.replace('已提交并推送', '已推送到远端')
+          : pushed.message
+        // 与 syncWrittenFile 写同一个字段、同一套'，'/'（…）'约定，前端只有一条显示分支。
+        lastSync = {
+          at: new Date().toISOString(),
+          vault,
+          rel: '',
+          ok: pushed.ok,
+          note: pushed.ok ? '，' + message : '（' + message + '）',
+        }
+        sendJson(res, 200, {
+          ok: pushed.ok,
+          vault,
+          vaultSource: seed.source,
+          message,
+          lastSync,
+        })
+      } catch (err) {
+        sendJson(res, 200, { ok: false, error: String((err && err.message) || err) })
+      }
+    },
+  }), 'dsh-note-changes: sync route')
 
   // ---- 模型工具：把本次会话的关键点追加进当日记录 ----
   // 为什么是「工具 + 规则」而不是「事件监听器自动写」：
@@ -1005,7 +1082,59 @@ export async function apply(ctx) {
     },
   }), 'dsh-note-changes: vault_note_append tool')
 
+  // ---- 模型工具：查自己以前记过什么（v1.7.0）----
+  // 为什么需要它：上面那条写入工具的规则要求"同类型的坑并入既有条目"，但 AI 看不到自己
+  // 几天前写过什么 —— 没有这条读路，"并入"只能靠猜（结果就是同一个坑反复新开条目）。
+  // 用 `git grep`（只读）而不是遍历目录：不动任何文件、不引新的 fs API，
+  // 且天然只搜被 git 跟踪的笔记（未提交的草稿不会污染结果）。
+  ctx.effect(() => ctx.tools.register({
+    name: 'vault_note_search',
+    description: '在 vault 的日记目录里按关键词搜索，返回命中行（文件:行号:内容）。只读，不改文件。'
+      + '收工写要点之前用它确认"这个坑是不是已经记过"：命中同类型条目时应当并入那一条、'
+      + '不要重复新开（同类合并是本库的记账方式）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '关键词，忽略大小写（按普通串处理，不必写正则）' },
+        limit: { type: 'number', description: '最多返回多少行，默认 30、上限 100' },
+        vault: { type: 'string', description: '可选，vault 绝对路径；不填则走同一把梯子' },
+      },
+      required: ['query'],
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_a, v) => [{ type: 'text', text: String(v) }],
+    },
+    async execute(args) {
+      const query = String((args && args.query) || '').trim()
+      if (query.length === 0) return '没查：query 为空，给一个关键词。'
+      // 我们拼的是 shell 片段，引号/反斜杠/`$` 会把它拆坏（同 buildSyncMessage 的处理）
+      const safe = query.replace(/["`$\\]/g, ' ').trim()
+      if (safe.length === 0) return '没查：query 里只有引号、反斜杠这类会被 shell 吃掉的字符。'
+      const limit = Math.min(Math.max(Number((args && args.limit) || 30) || 30, 1), 100)
+
+      const seed = await resolveVault(typeof args.vault === 'string' ? args.vault : '', ctx.get('fs'))
+      const vault = seed.vault
+      if (vault.length === 0) return '没查：解析不出 vault 路径（显式参数、' + ENV_VAULT_KEY + '、指针文件、默认值都空）。'
+
+      const result = await runGitIn(
+        vault, ['grep', '-n', '-i', '-e', '"' + safe + '"', '--', '"' + DAILY_DIR + '"'], 30000,
+      )
+      // git grep 无命中时退出码是 1（不是故障），要和真失败分开说
+      if (!result || result.code !== 0) {
+        if (!result || result.code === 1) return '没找到含「' + query + '」的日记条目（' + DAILY_DIR + '）。'
+        return '没查成：' + gitDetail(result)
+      }
+      const lines = String(result.stdout || '').split(/\r?\n/).filter((line) => line.trim().length > 0)
+      if (lines.length === 0) return '没找到含「' + query + '」的日记条目（' + DAILY_DIR + '）。'
+      const shown = lines.slice(0, limit)
+      return '命中 ' + String(lines.length) + ' 行'
+        + (lines.length > shown.length ? '（只列前 ' + String(shown.length) + ' 行）' : '')
+        + '：\n' + shown.join('\n')
+    },
+  }), 'dsh-note-changes: vault_note_search tool')
+
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.6.2)')
+  console.log('[dsh-note-changes] host up (v1.7.0)')
 }

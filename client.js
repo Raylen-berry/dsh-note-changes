@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Client half (v1.2.0)
+// dsh-note-changes · Client half (v1.7.0)
 // ============================================================================
 // 右侧抽屉 = 上「改动时间线」+ 下「相关笔记」拉杆抽屉；设置页一个分区。
 //
@@ -34,6 +34,7 @@ window.__ModuleLoader__.load({
     var LOG_PATH = '/note-changes/log'
     var NOTE_PATH = '/note-changes/note'
     var SETTINGS_PATH = '/note-changes/settings'
+    var SYNC_PATH = '/note-changes/sync'
     var DEFAULT_VAULT = 'E:/vault'
     var STORE_KEY = 'dsh-note-changes:vault'
 
@@ -46,8 +47,6 @@ window.__ModuleLoader__.load({
       var insetMatch = /[?&]dsh-desktop-titlebar-inset=(\d+)/.exec(window.location.search)
       if (insetMatch) TITLEBAR_INSET = Math.max(0, parseInt(insetMatch[1], 10) || 0)
     } catch (err) { TITLEBAR_INSET = 0 }
-
-    var PANEL_TOP = Math.max(48, TITLEBAR_INSET + 14)
 
     var CSS = [
       // ---------- 折叠态：右侧竖排标签 ----------
@@ -78,6 +77,10 @@ window.__ModuleLoader__.load({
       '.dnc-body::-webkit-scrollbar-track{background:transparent}',
 
       // ---------- 时间线：日期作一级标题、当天改动作二级 ----------
+      // 时间线过滤框（v1.7.0）：用原生 input[type=search]，带浏览器的清除按钮
+      '.dnc-filter{width:100%;box-sizing:border-box;margin:0 0 10px;padding:4px 8px;font:inherit;',
+      'font-size:11.5px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);',
+      'border:1px solid var(--dsw-alias-border-l1);border-radius:7px}',
       '.dnc-count{font-size:11px;color:var(--dsw-alias-label-tertiary);margin-bottom:12px;word-break:break-all}',
       '.dnc-group{margin-bottom:16px}',
       '.dnc-groupDate{font-size:13px;font-weight:600;letter-spacing:.02em;color:var(--dsw-alias-label-primary);',
@@ -137,6 +140,10 @@ window.__ModuleLoader__.load({
       '.dnc-doc th,.dnc-doc td{border:1px solid var(--dsw-alias-border-l1);padding:4px 7px;text-align:left}',
       '.dnc-doc th{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2)}',
       '.dnc-doctrunc{margin:2px 0 10px;font-size:11px;color:var(--dsw-alias-label-dimmed)}',
+      // 「在 Obsidian 里打开」（v1.7.0）：只读抽屉里唯一的外链
+      '.dnc-docbar{display:flex;justify-content:flex-end;margin:0 0 6px}',
+      '.dnc-open{font:inherit;font-size:11px;color:var(--dsw-alias-label-secondary);background:none;border:0;border-bottom:1px dotted currentColor;padding:0;cursor:pointer}',
+      '.dnc-open:hover{color:var(--dsw-alias-label-primary)}',
 
       // ---------- 错误 ----------
       '.dnc-errorbox{border:1px solid var(--dsw-alias-state-error-primary);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1)}',
@@ -443,7 +450,9 @@ window.__ModuleLoader__.load({
         settingsPhase: 'idle',
         settingsError: '',
         settingsSource: '',
-        settingsExists: null,
+        lastSync: null,                 // host 最近一次同步回执：{ at, ok, note, rel }
+        syncPhase: 'idle',              // 重试同步的进行中状态
+        syncError: '',
       }
 
       function notify() {
@@ -467,6 +476,15 @@ window.__ModuleLoader__.load({
         if (store.override.length > 0) parts.push('vault=' + encodeURIComponent(store.override))
         if (extra) parts.push(extra)
         return parts.length > 0 ? path + '?' + parts.join('&') : path
+      }
+
+      /** fetch 的 response → { status, body, raw }。解不开 JSON 就 body=null，原文留在 raw 里报错用。 */
+      function readJson(response) {
+        return response.text().then(function (text) {
+          var body = null
+          try { body = JSON.parse(text) } catch (err) { body = null }
+          return { status: response.status, body: body, raw: text }
+        })
       }
 
       var SOURCE_LABELS = {
@@ -508,33 +526,35 @@ window.__ModuleLoader__.load({
         store.vaultPath = String((body && body.vaultPath) || '')
       }
 
+      /** 设置路由的共用收尾：成功就落地刷新，失败就回报（读和写各传一句自己的失败文案）。 */
+      function applySettingsBody(body, fallbackError) {
+        if (body && body.ok && body.settings) {
+          store.settingsPhase = 'ready'
+          store.settingsError = ''
+          store.settingsSource = String(body.source || '')
+          if (body.lastSync) store.lastSync = body.lastSync
+          captureSource(body)
+          applySettings(body.settings)
+        } else {
+          store.settingsPhase = 'error'
+          store.settingsError = (body && body.error) ? String(body.error) : fallbackError
+          bump()
+        }
+      }
+
+      /** 网络层/解析层失败时的统一收尾。 */
+      function failSettings(error) {
+        store.settingsPhase = 'error'
+        store.settingsError = errText(error)
+        bump()
+      }
+
       function loadSettings() {
         store.settingsPhase = 'loading'
-        fetch(withQuery(SETTINGS_PATH), {
-          headers: { accept: 'application/json' },
-        })
-          .then(function (response) { return response.text() })
-          .then(function (text) {
-            var body = null
-            try { body = JSON.parse(text) } catch (err) { body = null }
-            if (body && body.ok && body.settings) {
-              store.settingsPhase = 'ready'
-              store.settingsError = ''
-              store.settingsSource = String(body.source || '')
-              store.settingsExists = body.exists !== false
-              captureSource(body)
-              applySettings(body.settings)
-            } else {
-              store.settingsPhase = 'error'
-              store.settingsError = (body && body.error) ? String(body.error) : '设置读取失败'
-              bump()
-            }
-          })
-          .catch(function (error) {
-            store.settingsPhase = 'error'
-            store.settingsError = errText(error)
-            bump()
-          })
+        fetch(withQuery(SETTINGS_PATH), { headers: { accept: 'application/json' } })
+          .then(readJson)
+          .then(function (res) { applySettingsBody(res.body, '设置读取失败') })
+          .catch(failSettings)
       }
 
       function saveSettings(patch) {
@@ -545,26 +565,58 @@ window.__ModuleLoader__.load({
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           body: JSON.stringify({ patch: patch }),
         })
-          .then(function (response) { return response.text() })
-          .then(function (text) {
-            var body = null
-            try { body = JSON.parse(text) } catch (err) { body = null }
-            if (body && body.ok && body.settings) {
-              store.settingsPhase = 'ready'
-              store.settingsError = ''
-              captureSource(body)
-              applySettings(body.settings)
-            } else {
-              store.settingsPhase = 'error'
-              store.settingsError = (body && body.error) ? String(body.error) : '设置写入失败'
-              bump()
+          .then(readJson)
+          .then(function (res) { applySettingsBody(res.body, '设置写入失败') })
+          .catch(failSettings)
+      }
+
+      /**
+       * 重试同步（v1.7.0）：只重推，不碰工作区、不新建提交。
+       * 抽屉里显示的那次提交如果当时 push 失败（网络/沙箱），内容只是停在本地 ——
+       * 这里给它第二次机会。回执与写入后的自动同步共用同一个显示字段。
+       */
+      function syncNow() {
+        if (store.syncPhase === 'running') return
+        store.syncPhase = 'running'
+        store.syncError = ''
+        bump()
+        fetch(withQuery(SYNC_PATH), { method: 'POST', headers: { accept: 'application/json' } })
+          .then(readJson)
+          .then(function (res) {
+            store.syncPhase = 'idle'
+            var body = res.body
+            if (body && body.lastSync) store.lastSync = body.lastSync
+            if (!body || body.ok !== true) {
+              store.syncError = (body && (body.error || body.message)) || '推送失败（响应体不是 JSON）'
             }
-          })
-          .catch(function (error) {
-            store.settingsPhase = 'error'
-            store.settingsError = errText(error)
             bump()
           })
+          .catch(function (error) {
+            store.syncPhase = 'idle'
+            store.syncError = errText(error)
+            bump()
+          })
+      }
+
+      /**
+       * 复制库内路径：真正想"一键跳去 Obsidian"，但桌面版把 `obsidian://` 这类外部协议挡掉了
+       * （`secureWindow` 的 setWindowOpenHandler 只对 http/https 调 shell.openExternal，其余 deny，
+       * 实测 window.open 直接返回 null、新标签页也不出现）。所以退到可验证的一步：
+       * 复制库内相对路径，到 Obsidian 里 Ctrl+O 粘贴即可打开。库名取 vault 目录名这条信息不再需要。
+       * 用 execCommand 而不是 navigator.clipboard：后者要权限、失败是异步的，这里要一个确定的返回值。
+       */
+      function copyRelPath(text) {
+        var ta = document.createElement('textarea')
+        ta.value = String(text)
+        ta.setAttribute('readonly', '')
+        ta.style.position = 'fixed'
+        ta.style.top = '-1000px'
+        document.body.appendChild(ta)
+        ta.select()
+        var ok = false
+        try { ok = document.execCommand('copy') } catch (e) { ok = false }
+        document.body.removeChild(ta)
+        return ok
       }
       function useVersion() {
         var pair = React.useState(store.version)
@@ -585,16 +637,8 @@ window.__ModuleLoader__.load({
           var alive = true
           setState({ phase: 'loading', commits: [], error: '', vault: store.vault })
 
-          fetch(withQuery(LOG_PATH), {
-            headers: { accept: 'application/json' },
-          })
-            .then(function (response) {
-              return response.text().then(function (text) {
-                var body = null
-                try { body = JSON.parse(text) } catch (err) { body = null }
-                return { status: response.status, body: body, raw: text }
-              })
-            })
+          fetch(withQuery(LOG_PATH), { headers: { accept: 'application/json' } })
+            .then(readJson)
             .then(function (res) {
               if (!alive) return
               var body = res.body
@@ -648,13 +692,7 @@ window.__ModuleLoader__.load({
           fetch(withQuery(NOTE_PATH, 'path=' + encodeURIComponent(path)), {
             headers: { accept: 'application/json' },
           })
-            .then(function (response) {
-              return response.text().then(function (text) {
-                var body = null
-                try { body = JSON.parse(text) } catch (err) { body = null }
-                return { status: response.status, body: body }
-              })
-            })
+            .then(readJson)
             .then(function (res) {
               if (!alive) return
               var body = res.body
@@ -759,18 +797,31 @@ window.__ModuleLoader__.load({
       }
 
       function Timeline(props) {
-        var state = useScan()
+        // state 由调用方传进来 —— 以前这里自己再 useScan() 一次，抽屉展开时会发两遍同一个请求。
+        var state = props.state
+        // 过滤框（v1.7.0）：hook 必须排在下面所有提前 return 之前，否则 loading→ready
+        // 时 hook 数量变化，React 抛 "Rendered more hooks than during the previous render"。
+        var filterPair = React.useState('')
+        var rawQuery = filterPair[0]
+        var setQuery = filterPair[1]
 
         if (state.phase === 'loading') return h('div', { className: 'dnc-muted' }, '正在读取 git 历史…')
         if (state.phase === 'error') return h(ErrorBox, { text: state.error })
-        if (state.commits.length === 0) return h('div', { className: 'dnc-muted' }, '这个仓库还没有提交。')
+
+        var all = state.commits || []
+        var query = rawQuery.trim().toLowerCase()
+        var commits = query.length === 0 ? all : all.filter(function (c) {
+          var hay = String(c.subject || '') + ' ' + String(c.date || '') + ' '
+            + String(c.author || '') + ' ' + (c.files || []).join(' ')
+          return hay.toLowerCase().indexOf(query) >= 0
+        })
 
         // 按日期分组：日期作一级标题，当天所有改动挂在它下面作二级条目，
         // 不再每条都重复一遍日期。
         var groups = []
         var indexOfDate = {}
-        for (var n = 0; n < state.commits.length; n++) {
-          var commit = state.commits[n]
+        for (var n = 0; n < commits.length; n++) {
+          var commit = commits[n]
           var day = String(commit.date || '(无日期)')
           if (indexOfDate[day] === undefined) {
             indexOfDate[day] = groups.length
@@ -803,8 +854,17 @@ window.__ModuleLoader__.load({
 
         return h('div', null,
           h('div', { className: 'dnc-count' },
-            String(state.commits.length) + ' 次提交 · ' + String(groups.length) + ' 天 · ' + state.vault),
-          rendered)
+            String(commits.length) + (query.length > 0 ? ' / ' + String(all.length) : '')
+            + ' 次提交 · ' + String(groups.length) + ' 天 · ' + state.vault),
+          all.length > 0 ? h('input', {
+            type: 'search',
+            className: 'dnc-filter',
+            placeholder: '过滤：标题 / 日期 / 作者 / 文件名',
+            value: rawQuery,
+            onChange: function (event) { setQuery(event.target.value) },
+          }) : null,
+          all.length === 0 ? h('div', { className: 'dnc-muted' }, '这个仓库还没有提交。')
+            : (commits.length === 0 ? h('div', { className: 'dnc-muted' }, '没有匹配的提交。') : rendered))
       }
 
       /** 底部拉杆抽屉：列出这批改动碰过的笔记，点开直接读正文。 */
@@ -812,6 +872,9 @@ window.__ModuleLoader__.load({
         var pathPair = React.useState(null)
         var openPath = pathPair[0]
         var setOpenPath = pathPair[1]
+        var copiedPair = React.useState('')
+        var copied = copiedPair[0]
+        var setCopied = copiedPair[1]
         var noteState = useNote(openPath, openPath != null)
 
         var paths = props.paths || []
@@ -834,6 +897,15 @@ window.__ModuleLoader__.load({
               noteState.phase === 'loading' ? h('div', { className: 'dnc-muted', style: { padding: '6px 10px' } }, '正在读取…')
                 : noteState.phase === 'error' ? h('div', { className: 'dnc-kdrawer' }, h(ErrorBox, { text: noteState.error }))
                   : h('div', { className: 'dnc-doc' },
+                      // 只读预览到这里就够了，真正要改笔记得去 Obsidian —— 但这台 GUI 打不开外部协议，
+                      // 所以给的是"复制路径"（Obsidian 里 Ctrl+O 粘进去）而不是一个点了没反应的链接
+                      h('div', { className: 'dnc-docbar' },
+                        h('button', {
+                          type: 'button',
+                          className: 'dnc-open',
+                          title: '复制库内路径（' + p + '）—— 到 Obsidian 里 Ctrl+O 粘贴即可打开',
+                          onClick: function () { setCopied(copyRelPath(p) ? p : '') },
+                        }, copied === p ? '已复制' : '复制路径')),
                       noteState.truncated ? h('div', { className: 'dnc-doctrunc' }, '（文件太长，已截断显示）') : null,
                       renderDoc(noteState.text))
             ) : null)
@@ -963,7 +1035,7 @@ window.__ModuleLoader__.load({
               onClick: function () { setOpen(false) },
             })
           ),
-          h('div', { className: 'dnc-body' }, h(Timeline, null)),
+          h('div', { className: 'dnc-body' }, h(Timeline, { state: scan })),
           kOpen ? h(KnowledgeDrawer, { paths: paths }) : null,
           paths.length > 0 ? h('button', {
             type: 'button', className: 'dnc-kbar',
@@ -977,6 +1049,28 @@ window.__ModuleLoader__.load({
         )
       }
 
+      /**
+       * 回执时间戳转本地 MM-DD HH:mm。Host 给的是 `new Date().toISOString()`（UTC），
+       * 直接截字符串会显示成 UTC 时间 —— 实测差 8 小时（`…T04:03Z` 显示 04:03，本地其实是 12:03）。
+       */
+      function localStamp(iso) {
+        var d = new Date(iso)
+        if (!iso || isNaN(d.getTime())) return String(iso || '').slice(5, 16).replace('T', ' ')
+        var p = function (n) { return (n < 10 ? '0' : '') + n }
+        return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
+      }
+
+      /** 重试同步：本地已有的提交再推一次（网络/沙箱导致的 push 失败用这个，不会新建提交）。 */
+      function RetrySyncButton() {
+        var busy = store.syncPhase === 'running'
+        return h(ActionButton, {
+          variant: 'ghost', size: 'sm',
+          icon: icon('IconRefreshOutline16'),
+          title: busy ? '正在推送…' : '把本地已有的提交再推一次（不改文件、不新建提交）',
+          onClick: function () { syncNow() },
+        }, busy ? '推送中…' : '重试同步')
+      }
+
       /** 两个开关的渲染：设置页与输入框 chip 共用同一份，避免两处行为不一致。 */
       function ToggleRows(props) {
         return h('div', { className: 'dnc-toggles' },
@@ -986,7 +1080,7 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'dnc-hint' },
                   '设置存在 ', h('code', { className: 'dnc-code' }, store.settingsSource || '00-索引/插件设置.md'),
                   ' 里。写不进去时开关会弹回原值——这是失败的表现，不是开关坏了。'))
-            : h('div', { className: 'dnc-note', style: { marginBottom: '8px' } },
+            : h('div', { style: { marginBottom: '8px' } },
                 '设置来源：', h('code', { className: 'dnc-code' }, store.settingsSource || '00-索引/插件设置.md'),
                 store.settingsPhase === 'saving' ? ' · 写入中…'
                   : (store.settingsPhase === 'ready' ? ' · 已同步' : '')),
@@ -997,7 +1091,7 @@ window.__ModuleLoader__.load({
               onChange: function (event) { saveSettings({ scanVault: event.target.checked }) },
             }),
             h('span', null, '出错时优先查本库')),
-          h('div', { className: 'dnc-note' },
+          h('div', null,
             '实际行为由 ', h('code', { className: 'dnc-code' }, 'AGENTS.md'),
             ' 的 §0 保证——插件开关管不住 AI 去不去查。开启时「相关笔记」会把 ',
             h('code', { className: 'dnc-code' }, '关键词索引'), ' 钉在第一位。'),
@@ -1008,8 +1102,18 @@ window.__ModuleLoader__.load({
               onChange: function (event) { saveSettings({ autoWriteOnSessionEnd: event.target.checked }) },
             }),
             h('span', null, '收工自动写入要点')),
-          h('div', { className: 'dnc-note' },
-            '关掉后：AI 调用写入工具会被拒绝，事件兜底也不再补存根——一条都不会写。')
+          h('div', null,
+            '关掉后：AI 调用写入工具会被拒绝，事件兜底也不再补存根——一条都不会写。'),
+          // 同步回执（v1.7.0）：push 失败原本只写在工具回执里，回执滚走后就没人看得见了
+          h('div', { className: 'dnc-hint' },
+            store.lastSync
+              ? '上次同步 ' + (store.lastSync.ok ? '成功' : '失败') + ' · '
+                + localStamp(store.lastSync.at)
+                + ' · ' + String(store.lastSync.note || '').replace(/^[，、（]|[）]/g, '')
+              : '本次运行还没有同步回执（Host 重启即清空，写入后自动同步会填上）。',
+            store.syncError ? ' · ' + store.syncError : null,
+            h('br', null),
+            h(RetrySyncButton, null))
         )
       }
 
@@ -1080,6 +1184,7 @@ window.__ModuleLoader__.load({
         var draftPair = React.useState(store.vault)
         var draft = draftPair[0]
         var setDraft = draftPair[1]
+        var scan = useScan()
 
         return h('div', { className: 'dnc-wrap' },
           h('h3', { className: 'dnc-h' }, '笔记改动'),
@@ -1115,7 +1220,7 @@ window.__ModuleLoader__.load({
             }, '跟随本机引导'),
             h(ReloadButton, null)
           ),
-          h(Timeline, null)
+          h(Timeline, { state: scan })
         )
       }
 
@@ -1144,8 +1249,8 @@ window.__ModuleLoader__.load({
       // 设置来自 vault 文件：开页面时拉一次（localStorage 只做首屏兜底）
       try { loadSettings() } catch (err) { console.error('[dsh-note-changes] loadSettings 失败', err) }
 
-      console.log('[dsh-note-changes] client up (v1.5.0), primitives=' + (P ? 'yes' : 'no')
-        + ', titlebarInset=' + String(TITLEBAR_INSET) + ', panelTop=' + String(PANEL_TOP))
+      console.log('[dsh-note-changes] client up (v1.7.0), primitives=' + (P ? 'yes' : 'no')
+        + ', titlebarInset=' + String(TITLEBAR_INSET))
     }
 
     var inject = ['slots']
@@ -1156,6 +1261,8 @@ window.__ModuleLoader__.load({
       DEFAULT_VAULT: DEFAULT_VAULT,
       LOG_PATH: LOG_PATH,
       NOTE_PATH: NOTE_PATH,
+      SETTINGS_PATH: SETTINGS_PATH,
+      SYNC_PATH: SYNC_PATH,
     }
 
     return module.exports
