@@ -4,6 +4,16 @@ import os from 'node:os'
 import { createHash } from 'node:crypto'
 import { apply } from '../index.js'
 export const hash = (text) => createHash('sha256').update(text).digest('hex')
+async function canonical(p) {
+  try {
+    return await fs.realpath(p)
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+    const parent = path.dirname(p)
+    if (parent === p) throw error
+    return path.join(await canonical(parent), path.basename(p))
+  }
+}
 export async function fixture() {
   const vault = await fs.mkdtemp(path.join(os.tmpdir(), 'dnc-workspace-')),
     routes = {},
@@ -11,7 +21,7 @@ export async function fixture() {
   const previousVault = process.env.DNC_VAULT
   process.env.DNC_VAULT = vault
   const disk = {
-    resolve: async (p) => ({ displayPath: p, targetKey: await fs.realpath(p).catch(() => p) }),
+    resolve: async (p) => ({ displayPath: p, targetKey: await canonical(p) }),
     stat: async (t) => {
       try {
         const s = await fs.stat(t.targetKey)
@@ -26,6 +36,7 @@ export async function fixture() {
       }
     },
     readText: (t) => fs.readFile(t.targetKey, 'utf8'),
+    readBytes: (t) => fs.readFile(t.targetKey),
     listDir: async (t) =>
       Promise.all(
         (await fs.readdir(t.targetKey, { withFileTypes: true })).map(async (e) => ({
@@ -33,6 +44,9 @@ export async function fixture() {
           type: e.isDirectory() ? 'directory' : 'file',
           target: await disk.resolve(path.join(t.targetKey, e.name)),
           size: e.isDirectory() ? 0 : (await fs.stat(path.join(t.targetKey, e.name))).size,
+          version: e.isDirectory()
+            ? 'dir'
+            : hash(await fs.readFile(path.join(t.targetKey, e.name))),
         })),
       ),
     writeText: async (t, text, expected) => {
@@ -41,7 +55,10 @@ export async function fixture() {
         e.code = 'FS_STALE_VERSION'
         throw e
       }
-      await fs.writeFile(t.targetKey, text)
+      await fs.mkdir(path.dirname(t.targetKey), { recursive: true })
+      await fs.writeFile(t.targetKey, text, {
+        flag: expected?.kind === 'createIfAbsent' ? 'wx' : 'w',
+      })
     },
   }
   await fs.mkdir(path.join(vault, '日记'))

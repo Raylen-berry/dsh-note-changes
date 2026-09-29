@@ -115,7 +115,7 @@ const resetGit = () => { calls.git.length = 0; gitQueue = [] }
 
 console.log('— 0. 四条路由都注册上了，且注册顺序/路径与导出的 ROUTES 一致 —')
 for (const [key, p] of Object.entries(ROUTES)) ok('ROUTES.' + key + ' = ' + p + ' 已注册', typeof routes[p] === 'function')
-ok('六条工作区路由全部注册', Object.keys(ROUTES).length === 6, String(Object.keys(ROUTES).length))
+ok('九条工作区路由全部注册', Object.keys(ROUTES).length === 9, String(Object.keys(ROUTES).length))
 if (Object.keys(routes).length === 0) { console.log('\n结果：' + pass + ' / ' + (fail + 1)); process.exit(1) }
 
 console.log('\n— 1. log：编码过的 ?vault= 解码正确 —')

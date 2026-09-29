@@ -3,7 +3,10 @@ var LOG_PATH = '/note-changes/log',
   SETTINGS_PATH = '/note-changes/settings',
   SYNC_PATH = '/note-changes/sync',
   LIBRARY_PATH = '/note-changes/library',
-  SAVE_PATH = '/note-changes/save'
+  SAVE_PATH = '/note-changes/save',
+  CREATE_PATH = '/note-changes/create',
+  ASSET_PATH = '/note-changes/asset',
+  VENDOR_PATH = '/note-changes/vendor'
 function stored(storage, key, fallback) {
   try {
     return storage.getItem(key) || fallback
@@ -82,12 +85,13 @@ function Button(props) {
   return h('button', { type: 'button', ...props }, props.children)
 }
 function Tree({ notes, current, onOpen }) {
-  var tree = { files: [], folders: {} }
+  var tree = { files: [], folders: Object.create(null) }
   notes.forEach((note) => {
     var parts = note.path.split('/'),
       branch = tree
     parts.slice(0, -1).forEach((name) => {
-      branch = branch.folders[name] || (branch.folders[name] = { files: [], folders: {} })
+      branch =
+        branch.folders[name] || (branch.folders[name] = { files: [], folders: Object.create(null) })
     })
     branch.files.push(note)
   })
@@ -308,6 +312,14 @@ function apply(ctx) {
       [error, setError] = React.useState(''),
       [choices, setChoices] = React.useState([]),
       [conflict, setConflict] = React.useState(false),
+      [merge, setMerge] = React.useState(null),
+      [mergeLoading, setMergeLoading] = React.useState(false),
+      [creating, setCreating] = React.useState(''),
+      [graphVisible, setGraphVisible] = React.useState(false),
+      [tag, setTag] = React.useState(''),
+      [property, setProperty] = React.useState(''),
+      [propertyValue, setPropertyValue] = React.useState(''),
+      [shelf, setShelf] = React.useState('all'),
       draftFailed = React.useRef(false)
     var library = useResource(LIBRARY_PATH, vault, { refresh: refresh ? '1' : '0' }, refresh),
       results = useResource(LIBRARY_PATH, vault, { q: search }, refresh, !!search),
@@ -319,6 +331,31 @@ function apply(ctx) {
       draftKey = 'dnc:draft:' + actualVault + ':' + selected
     var draftKeyRef = React.useRef(draftKey)
     draftKeyRef.current = draftKey
+    var collections = useCollections(actualVault, note?.path === selected ? selected : ''),
+      graph = React.useMemo(() => buildGraph(notes), [library.data]),
+      orphanSet = new Set(graph.orphans.map((n) => n.path)),
+      candidates = search ? results.data?.notes || [] : notes,
+      filtered = candidates.filter(
+        (n) =>
+          (!tag || n.tags?.includes(tag)) &&
+          (!property ||
+            (n.properties?.[property] &&
+              (!propertyValue || n.properties[property].includes(propertyValue)))) &&
+          (shelf === 'favorites'
+            ? collections.favorites.includes(n.path)
+            : shelf === 'recent'
+              ? collections.recent.includes(n.path)
+              : shelf === 'orphans'
+                ? orphanSet.has(n.path)
+                : true),
+      ),
+      tags = [...new Set(notes.flatMap((n) => n.tags || []))].sort(),
+      properties = [...new Set(notes.flatMap((n) => Object.keys(n.properties || {})))].sort(),
+      values = [...new Set(notes.flatMap((n) => n.properties?.[property] || []))].sort()
+    if (shelf === 'recent')
+      filtered.sort(
+        (a, b) => collections.recent.indexOf(a.path) - collections.recent.indexOf(b.path),
+      )
     React.useEffect(() => {
       var timer = setTimeout(() => setSearch(query.trim()), 180)
       return () => clearTimeout(timer)
@@ -331,6 +368,13 @@ function apply(ctx) {
       setMessage('')
       setDraft('')
       setBase('')
+      setMerge(null)
+      setCreating('')
+      setTag('')
+      setProperty('')
+      setPropertyValue('')
+      setShelf('all')
+      setGraphVisible(false)
     }, [vault])
     React.useEffect(() => {
       if (library.data && !selected) {
@@ -384,6 +428,8 @@ function apply(ctx) {
         return
       }
       setSelected(path)
+      setMerge(null)
+      setGraphVisible(false)
       setTab('notes')
       setMobile(false)
       setEditing(false)
@@ -395,6 +441,38 @@ function apply(ctx) {
         window.localStorage.setItem('dnc:last:' + actualVault, path)
       } catch (_) {}
     }
+    async function compare() {
+      var key = draftKey
+      setMergeLoading(true)
+      try {
+        var latest = await api(url(NOTE_PATH, actualVault, { path: selected }))
+        if (draftKeyRef.current !== key) return
+        if (latest.truncated) throw new Error('磁盘版本较长，请在 Obsidian 中合并')
+        setMerge(latest)
+        setGraphVisible(false)
+      } catch (e) {
+        if (draftKeyRef.current === key) setError(e.message)
+      } finally {
+        setMergeLoading(false)
+      }
+    }
+    function applyMerge(text, latest) {
+      setBase(latest.text)
+      setBaseRevision(latest.revision)
+      setDraft(text)
+      setMerge(null)
+      setConflict(false)
+      setError('')
+      setEditing(true)
+      try {
+        window.sessionStorage.setItem(draftKey, JSON.stringify({ text, revision: latest.revision }))
+        draftFailed.current = false
+      } catch (_) {
+        draftFailed.current = true
+        setError('无法暂存草稿，请在离开前保存或复制正文')
+      }
+      setMessage('已合并到草稿，请检查正文后保存')
+    }
     function reloadDisk() {
       if (dirty && !copyRelPath(draft)) {
         setError('未能复制草稿，请手动复制后再读取新版')
@@ -404,6 +482,7 @@ function apply(ctx) {
         window.sessionStorage.removeItem(draftKey)
       } catch (_) {}
       setConflict(false)
+      setMerge(null)
       setError('')
       setMessage(dirty ? '草稿已复制，请对照新版合并' : '已重新读取')
       setDraft(base)
@@ -425,7 +504,7 @@ function apply(ctx) {
       }
     }
     async function save() {
-      if (saving || !note || note.path !== selected || !dirty) return
+      if (saving || merge || creating || !note || note.path !== selected || !dirty) return
       const normalizedVault = (value) => String(value).replace(/\\/g, '/').replace(/\/+$/, '')
       if (vault && normalizedVault(vault) !== normalizedVault(note.vault)) return
       var text = draft,
@@ -436,7 +515,7 @@ function apply(ctx) {
       setError('')
       setMessage('正在保存并同步…')
       try {
-        var result = await api(url(SAVE_PATH, vault), {
+        var result = await api(url(SAVE_PATH, actualVault), {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-dnc-editor': '1' },
           body: JSON.stringify({ path, text, revision }),
@@ -468,15 +547,33 @@ function apply(ctx) {
         save()
       }
     }
-    var backlinks = notes.filter(
-      (n) =>
-        n.path !== selected &&
-        n.links.some((link) => resolveLinks(link, n.path, notes).some((x) => x.path === selected)),
-    )
+    var incoming = new Set(graph.edges.filter((e) => e.to === selected).map((e) => e.from)),
+      backlinks = notes.filter((n) => incoming.has(n.path))
     var outbound = (note?.links || []).filter(Boolean)
     return h(
       'div',
       { className: 'dnc-workspace', onKeyDown: onKey, 'data-dnc-workspace': true },
+      creating
+        ? h(CreateNote, {
+            vault: actualVault,
+            notes,
+            daily: creating === 'daily',
+            onClose: () => setCreating(''),
+            onOpen: open,
+            onCreated: (result) => {
+              setCreating('')
+              open(result.path)
+              setQuery('')
+              setTag('')
+              setProperty('')
+              setPropertyValue('')
+              setShelf('all')
+              setEditing(true)
+              setRefresh((n) => n + 1)
+              setMessage('新笔记已创建' + (result.sync || ''))
+            },
+          })
+        : null,
       h(
         'header',
         { className: 'dnc-top' },
@@ -516,6 +613,24 @@ function apply(ctx) {
                 h(
                   'aside',
                   { className: 'dnc-left', 'data-open': mobile },
+                  h(
+                    'div',
+                    { className: 'dnc-actions dnc-new-actions' },
+                    h(
+                      Button,
+                      {
+                        className: 'dnc-primary',
+                        disabled: !library.data,
+                        onClick: () => setCreating('blank'),
+                      },
+                      '＋ 新建',
+                    ),
+                    h(
+                      Button,
+                      { disabled: !library.data, onClick: () => setCreating('daily') },
+                      '今日笔记',
+                    ),
+                  ),
                   h('input', {
                     className: 'dnc-search',
                     type: 'search',
@@ -524,15 +639,107 @@ function apply(ctx) {
                     value: query,
                     onChange: (e) => setQuery(e.target.value),
                   }),
-                  h('div', { className: 'dnc-label' }, search ? '搜索结果' : '文件目录'),
+                  h(
+                    'div',
+                    { className: 'dnc-shelves', 'aria-label': '笔记集合' },
+                    [
+                      ['all', '全部'],
+                      ['favorites', '收藏'],
+                      ['recent', '最近'],
+                      ['orphans', '孤立笔记'],
+                    ].map(([value, label]) =>
+                      h(
+                        Button,
+                        {
+                          key: value,
+                          'aria-pressed': shelf === value,
+                          onClick: () => setShelf(value),
+                        },
+                        label,
+                      ),
+                    ),
+                  ),
+                  h(
+                    'details',
+                    { className: 'dnc-filters' },
+                    h('summary', null, '标签与属性' + (tag || property ? ' · 已筛选' : '')),
+                    h(
+                      'label',
+                      null,
+                      '标签',
+                      h(
+                        'select',
+                        {
+                          'aria-label': '标签筛选',
+                          value: tag,
+                          onChange: (e) => setTag(e.target.value),
+                        },
+                        h('option', { value: '' }, '全部标签'),
+                        tags.map((t) => h('option', { key: t, value: t }, '#' + t)),
+                      ),
+                    ),
+                    h(
+                      'label',
+                      null,
+                      '属性',
+                      h(
+                        'select',
+                        {
+                          'aria-label': '属性筛选',
+                          value: property,
+                          onChange: (e) => {
+                            setProperty(e.target.value)
+                            setPropertyValue('')
+                          },
+                        },
+                        h('option', { value: '' }, '全部属性'),
+                        properties.map((p) => h('option', { key: p, value: p }, p)),
+                      ),
+                    ),
+                    property
+                      ? h(
+                          'label',
+                          null,
+                          '属性值',
+                          h(
+                            'select',
+                            {
+                              'aria-label': '属性值筛选',
+                              value: propertyValue,
+                              onChange: (e) => setPropertyValue(e.target.value),
+                            },
+                            h('option', { value: '' }, '任意值'),
+                            values.map((v) => h('option', { key: v, value: v }, v)),
+                          ),
+                        )
+                      : null,
+                    tag || property
+                      ? h(
+                          Button,
+                          {
+                            onClick: () => {
+                              setTag('')
+                              setProperty('')
+                              setPropertyValue('')
+                            },
+                          },
+                          '清除筛选',
+                        )
+                      : null,
+                  ),
+                  h(
+                    'div',
+                    { className: 'dnc-label' },
+                    (search ? '搜索结果' : '文件目录') + ' · ' + filtered.length,
+                  ),
                   h(ErrorBox, { text: library.error || results.error }),
                   library.loading
                     ? h('p', { className: 'dnc-notice' }, '正在读取笔记库…')
-                    : search
+                    : search || shelf === 'recent'
                       ? results.loading
                         ? h('p', null, '正在搜索…')
-                        : results.data?.notes?.length
-                          ? results.data.notes.map((n) =>
+                        : filtered.length
+                          ? filtered.map((n) =>
                               h(
                                 Button,
                                 {
@@ -545,7 +752,9 @@ function apply(ctx) {
                               ),
                             )
                           : h('p', { className: 'dnc-notice' }, '没有匹配的笔记')
-                      : h(Tree, { notes, current: selected, onOpen: open }),
+                      : filtered.length
+                        ? h(Tree, { notes: filtered, current: selected, onOpen: open })
+                        : h('p', { className: 'dnc-notice' }, '这个集合还没有笔记'),
                 ),
                 h(
                   'main',
@@ -561,11 +770,32 @@ function apply(ctx) {
                     h(
                       Button,
                       {
-                        disabled: !note || saving,
+                        disabled: !note || saving || !!merge,
                         'aria-pressed': editing,
-                        onClick: () => setEditing(!editing),
+                        onClick: () => {
+                          setEditing(!editing)
+                          setGraphVisible(false)
+                        },
                       },
                       editing ? '阅读' : '编辑',
+                    ),
+                    h(
+                      Button,
+                      {
+                        disabled: !selected,
+                        'aria-pressed': collections.favorites.includes(selected),
+                        onClick: () => collections.toggle(selected),
+                      },
+                      collections.favorites.includes(selected) ? '已收藏' : '收藏',
+                    ),
+                    h(
+                      Button,
+                      {
+                        disabled: !selected || !!merge,
+                        'aria-pressed': graphVisible,
+                        onClick: () => setGraphVisible(!graphVisible),
+                      },
+                      '关系图',
                     ),
                     h(
                       Button,
@@ -581,7 +811,7 @@ function apply(ctx) {
                           Button,
                           {
                             className: 'dnc-primary',
-                            disabled: !dirty || saving || note?.truncated,
+                            disabled: !dirty || saving || !!merge || note?.truncated,
                             onClick: save,
                           },
                           saving ? '保存中…' : '保存',
@@ -590,10 +820,15 @@ function apply(ctx) {
                   ),
                   h(ErrorBox, { text: documentState.error || error }),
                   message ? h('div', { className: 'dnc-status', role: 'status' }, message) : null,
-                  conflict
+                  conflict && !merge
                     ? h(
                         'div',
                         { className: 'dnc-notice' },
+                        h(
+                          Button,
+                          { disabled: mergeLoading, className: 'dnc-primary', onClick: compare },
+                          mergeLoading ? '正在读取差异…' : '对照合并',
+                        ),
                         h(Button, { onClick: reloadDisk }, '复制草稿并读取新版'),
                       )
                     : null,
@@ -606,49 +841,73 @@ function apply(ctx) {
                         ),
                       )
                     : null,
-                  documentState.loading
-                    ? h('div', { className: 'dnc-empty' }, '正在打开笔记…')
-                    : !note
-                      ? h(
-                          'div',
-                          { className: 'dnc-empty' },
-                          h('h2', null, '让笔记有自己的空间'),
-                          h(
-                            'p',
-                            null,
-                            notes.length
-                              ? '从左侧目录选择一篇笔记。'
-                              : '连接本地笔记库，开始整理你的想法。',
-                          ),
-                          h(Button, { onClick: () => setTab('settings') }, '笔记库设置'),
-                        )
-                      : editing
-                        ? note.truncated
+                  merge
+                    ? h(MergeView, {
+                        key: merge.revision,
+                        disk: merge,
+                        draft,
+                        onApply: applyMerge,
+                        onCancel: () => setMerge(null),
+                      })
+                    : graphVisible
+                      ? h(GraphView, {
+                          notes,
+                          selected,
+                          graph,
+                          partial: library.data?.partial,
+                          onOpen: open,
+                        })
+                      : documentState.loading
+                        ? h('div', { className: 'dnc-empty' }, '正在打开笔记…')
+                        : !note
                           ? h(
                               'div',
-                              { className: 'dnc-notice' },
-                              '这篇笔记较长，仅提供阅读预览，请在 Obsidian 中编辑。',
+                              { className: 'dnc-empty' },
+                              h('h2', null, '让笔记有自己的空间'),
+                              h(
+                                'p',
+                                null,
+                                notes.length
+                                  ? '从左侧目录选择一篇笔记。'
+                                  : '连接本地笔记库，开始整理你的想法。',
+                              ),
+                              h(Button, { onClick: () => setTab('settings') }, '笔记库设置'),
                             )
-                          : h('textarea', {
-                              className: 'dnc-editor',
-                              'aria-label': 'Markdown 正文',
-                              spellCheck: false,
-                              value: draft,
-                              disabled: saving,
-                              onChange: (e) => change(e.target.value),
-                            })
-                        : h(
-                            'div',
-                            { className: 'dnc-scroll' },
-                            h('article', { className: 'dnc-doc' }, renderDoc(draft, follow)),
-                            note.truncated
+                          : editing
+                            ? note.truncated
                               ? h(
                                   'div',
                                   { className: 'dnc-notice' },
-                                  '这里只展示前 60,000 字符，完整正文仍在本地。',
+                                  '这篇笔记较长，仅提供阅读预览，请在 Obsidian 中编辑。',
                                 )
-                              : null,
-                          ),
+                              : h('textarea', {
+                                  className: 'dnc-editor',
+                                  'aria-label': 'Markdown 正文',
+                                  spellCheck: false,
+                                  value: draft,
+                                  disabled: saving,
+                                  onChange: (e) => change(e.target.value),
+                                })
+                            : h(
+                                'div',
+                                { className: 'dnc-scroll' },
+                                h(
+                                  'article',
+                                  { className: 'dnc-doc' },
+                                  renderDoc(draft, follow, {
+                                    path: selected,
+                                    vault: actualVault,
+                                    assets: library.data?.assets || [],
+                                  }),
+                                ),
+                                note.truncated
+                                  ? h(
+                                      'div',
+                                      { className: 'dnc-notice' },
+                                      '这里只展示前 60,000 字符，完整正文仍在本地。',
+                                    )
+                                  : null,
+                              ),
                 ),
                 h(
                   'aside',
@@ -704,7 +963,12 @@ function apply(ctx) {
           'span',
           null,
           library.data
-            ? notes.length + ' 篇笔记' + (library.data.partial ? ' · 部分内容未索引' : '')
+            ? notes.length +
+                ' 篇笔记' +
+                (library.data.partial ? ' · 部分内容未索引' : '') +
+                (library.data.stats
+                  ? ' · 读取 ' + library.data.stats.read + ' / 复用 ' + library.data.stats.reused
+                  : '')
             : '本地笔记库',
         ),
         h('span', null, dirty ? '草稿未保存' : actualVault || '未连接'),
@@ -743,12 +1007,20 @@ function apply(ctx) {
       },
     ),
   )
-  console.log('[dsh-note-changes] client up (v1.8.0)')
+  console.log('[dsh-note-changes] client up (v1.9.0)')
 }
 exports.name = 'dsh-note-changes'
 exports.inject = ['slots']
 exports.apply = apply
 exports.internals = {
+  mergeSections,
+  composeMerge,
+  templateText,
+  buildGraph,
+  resolveAsset,
+  CREATE_PATH,
+  ASSET_PATH,
+  VENDOR_PATH,
   LOG_PATH,
   NOTE_PATH,
   SETTINGS_PATH,

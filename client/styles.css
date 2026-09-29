@@ -1,4 +1,5 @@
 .dnc-workspace {
+  position: relative;
   --nc-bg: var(--dsw-alias-bg-base, #f6f5f2);
   --nc-panel: var(--dsw-alias-bg-layer-1, #fff);
   --nc-text: var(--dsw-alias-label-primary, #282a2e);
@@ -23,6 +24,262 @@
 .dnc-workspace textarea {
   font: inherit;
   color: inherit;
+}
+.dnc-workspace select {
+  font: inherit;
+  color: var(--nc-text);
+  background: var(--nc-panel);
+  border: 1px solid var(--nc-line);
+  padding: 6px 8px;
+  border-radius: 6px;
+  max-width: 100%;
+}
+.dnc-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.dnc-new-actions {
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.dnc-shelves {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.dnc-shelves button {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.dnc-filters {
+  margin-bottom: 20px;
+  font-size: 12px;
+  color: var(--nc-muted);
+}
+.dnc-filters summary {
+  cursor: pointer;
+}
+.dnc-filters label {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0;
+}
+.dnc-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: #19172466;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  backdrop-filter: blur(3px);
+}
+.dnc-create {
+  width: min(560px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  background: var(--nc-panel);
+  border: 1px solid var(--nc-line);
+  border-radius: 18px;
+  padding: 28px;
+  box-shadow: 0 24px 80px #0003;
+}
+.dnc-create h2 {
+  margin: 0 0 22px;
+  font-size: 23px;
+  font-weight: 600;
+}
+.dnc-create label {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 16px;
+  color: var(--nc-muted);
+  font-size: 12px;
+}
+.dnc-create input {
+  width: 100%;
+  background: var(--nc-bg);
+  padding: 10px;
+  border: 1px solid var(--nc-line);
+  border-radius: 7px;
+}
+.dnc-template {
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  padding: 16px;
+  background: var(--nc-bg);
+  border-radius: 8px;
+  color: var(--nc-muted);
+  font:
+    12px/1.7 ui-monospace,
+    monospace;
+}
+.dnc-merge {
+  overflow: auto;
+  padding: 20px;
+}
+.dnc-merge-head h2 {
+  margin: 0;
+  font-size: 22px;
+}
+.dnc-merge-head p {
+  color: var(--nc-muted);
+}
+.dnc-unchanged {
+  margin: 16px 0;
+  color: var(--nc-muted);
+  font-size: 12px;
+}
+.dnc-change {
+  border: 1px solid var(--nc-line);
+  border-radius: 10px;
+  overflow: hidden;
+  margin: 16px 0;
+}
+.dnc-diff-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.dnc-diff-columns > div {
+  min-width: 0;
+  padding: 14px;
+  background: color-mix(in srgb, var(--nc-accent) 5%, var(--nc-panel));
+}
+.dnc-diff-columns > div:first-child {
+  border-right: 1px solid var(--nc-line);
+  background: var(--nc-bg);
+}
+.dnc-diff-columns h3 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--nc-muted);
+}
+.dnc-merge pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    13px/1.8 ui-monospace,
+    monospace;
+}
+.dnc-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--nc-line);
+}
+.dnc-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--nc-accent);
+  margin-top: 12px;
+}
+.dnc-graph h2 {
+  margin-top: 6px;
+}
+.dnc-graph svg {
+  width: 100%;
+  max-height: 440px;
+  background: radial-gradient(
+    ellipse at center,
+    color-mix(in srgb, var(--nc-accent) 5%, transparent),
+    transparent 72%
+  );
+}
+.dnc-graph svg g {
+  cursor: pointer;
+}
+.dnc-graph svg text {
+  fill: var(--nc-text);
+  font: 12px system-ui;
+}
+.dnc-edge-out {
+  pointer-events: none;
+  stroke: var(--nc-accent);
+  opacity: 0.45;
+  stroke-width: 1.5;
+}
+.dnc-edge-in {
+  pointer-events: none;
+  stroke: var(--nc-muted);
+  opacity: 0.5;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 5;
+}
+.dnc-node-main {
+  fill: var(--nc-accent);
+  stroke: color-mix(in srgb, var(--nc-accent) 15%, transparent);
+  stroke-width: 18;
+}
+.dnc-node {
+  fill: var(--nc-panel);
+  stroke: var(--nc-accent);
+  stroke-width: 2;
+}
+.dnc-graph-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.dnc-graph-links button {
+  border-color: var(--nc-line);
+  font-size: 12px;
+}
+.dnc-image {
+  display: block;
+  max-width: 100%;
+  max-height: 560px;
+  object-fit: contain;
+  margin: 16px auto;
+  border-radius: 8px;
+}
+.dnc-media {
+  display: block;
+  margin: 14px 0;
+}
+.dnc-media audio,
+.dnc-media video {
+  display: block;
+  max-width: 100%;
+  margin-bottom: 8px;
+}
+.dnc-attachment {
+  display: inline-block;
+  padding: 8px 12px;
+  border: 1px solid var(--nc-line);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.dnc-attachment-missing {
+  color: var(--nc-muted);
+  font-size: 12px;
+}
+.dnc-math[data-display='true'] {
+  display: block;
+  overflow: auto;
+  padding: 8px 0;
+}
+@media (max-width: 700px) {
+  .dnc-create {
+    padding: 20px;
+  }
+  .dnc-diff-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .dnc-diff-columns > div:first-child {
+    border-right: 0;
+    border-bottom: 1px solid var(--nc-line);
+  }
+  .dnc-merge {
+    padding: 12px;
+  }
 }
 .dnc-workspace button {
   cursor: pointer;

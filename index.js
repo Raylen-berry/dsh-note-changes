@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.8.0)
+// dsh-note-changes · Host half (v1.9.0)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -47,12 +47,15 @@ const SETTINGS_REL = '00-索引/插件设置.md'
 const SYNC_PATH = '/note-changes/sync'
 const LIBRARY_PATH = '/note-changes/library'
 const SAVE_PATH = '/note-changes/save'
+const CREATE_PATH = '/note-changes/create'
+const ASSET_PATH = '/note-changes/asset'
+const VENDOR_PATH = '/note-changes/vendor'
 
 /**
- * 四条路由路径的单一真源。client 半各自硬编码了一份（两半独立打包，不能互相 import），
+ * 路由路径的单一真源。client 半各自硬编码了一份（两半独立打包，不能互相 import），
  * 漂移由 tools/verify-note-changes-routes.mjs 的「client 常量 == ROUTES」断言拦住。
  */
-export const ROUTES = { log: LOG_PATH, note: NOTE_PATH, settings: SETTINGS_PATH, sync: SYNC_PATH, library: LIBRARY_PATH, save: SAVE_PATH }
+export const ROUTES = { log: LOG_PATH, note: NOTE_PATH, settings: SETTINGS_PATH, sync: SYNC_PATH, library: LIBRARY_PATH, save: SAVE_PATH, create: CREATE_PATH, asset: ASSET_PATH, vendor: VENDOR_PATH }
 
 /** 设置默认值（设置文件不存在或缺键时用）。 */
 const DEFAULT_SETTINGS = {
@@ -758,7 +761,8 @@ export async function apply(ctx) {
     }}), 'dsh-note-changes: ' + action + ' route')
   }
 
-  ctx.effect(() => webServer.register({ kind: 'exact', path: SAVE_PATH, handler: async (req, res) => {
+  for (const [route, action] of [[SAVE_PATH, 'save'], [CREATE_PATH, 'create']]) {
+  ctx.effect(() => webServer.register({ kind: 'exact', path: route, handler: async (req, res) => {
     try {
       if (req.method !== 'POST' || req.headers?.['x-dnc-editor'] !== '1' || !String(req.headers?.['content-type']).startsWith('application/json')) {
         sendJson(res, 403, { ok: false, error: '请从笔记编辑器保存' }); return
@@ -770,16 +774,38 @@ export async function apply(ctx) {
       const rel = notePath(payload.path)
       // The same lock key is shared with the diary append route.
       const result = await withWriteLock(seed.vault + '/' + rel, async () => {
-        const saved = await browser.save(seed.vault, rel, payload.text, payload.revision)
-        const sync = saved.changed ? await syncWrittenFile(seed.vault, rel, '编辑笔记') : ''
+        const saved = await browser[action](seed.vault, rel, payload.text, payload.revision)
+        const sync = saved.changed ? await syncWrittenFile(seed.vault, rel, action === 'create' ? '新建笔记' : '编辑笔记') : ''
         return { ...saved, sync, lastSync: saved.changed ? lastSync : null }
       })
       sendJson(res, 200, { ok: true, ...result })
     } catch (error) {
       const conflict = error.code === 'CONFLICT' || error.code === 'FS_STALE_VERSION'
-      sendJson(res, conflict ? 409 : 400, { ok: false, conflict, error: error.message })
+      sendJson(res, conflict || error.code === 'EXISTS' ? 409 : 400, { ok: false, conflict, error: error.message })
     }
-  }}), 'dsh-note-changes: save route')
+  }}), 'dsh-note-changes: ' + action + ' route')
+  }
+
+  ctx.effect(() => webServer.register({ kind: 'exact', path: ASSET_PATH, handler: async (req, res) => {
+    try {
+      if (req.method !== 'GET') throw new Error('附件只接受读取')
+      const seed = await resolveVault(queryParam(req.url, 'vault'), ctx.get('fs'))
+      const result = await browser.asset(seed.vault, queryParam(req.url, 'path'))
+      res.writeHead(200, { 'content-type': result.mime, 'content-length': result.bytes.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "sandbox; default-src 'none'" })
+      res.end(result.bytes)
+    } catch (error) { sendJson(res, 400, { ok: false, error: error.message }) }
+  }}), 'dsh-note-changes: asset route')
+
+  ctx.effect(() => webServer.register({ kind: 'exact', path: VENDOR_PATH, handler: (req, res) => {
+    try {
+      const file = queryParam(req.url, 'file')
+      if (!/^(katex\.min\.(?:js|css)|fonts\/KaTeX_[A-Za-z0-9-]+\.(?:woff2?|ttf))$/.test(file)) throw new Error('资源不存在')
+      let data = readFileSync(new URL('./vendor/katex/' + file, import.meta.url))
+      if (file.endsWith('.css')) data = Buffer.from(data.toString().replace(/url\((fonts\/[^)]+)\)/g, (_, font) => 'url(' + VENDOR_PATH + '?file=' + encodeURIComponent(font) + ')'))
+      const mime = file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : file.endsWith('.woff2') ? 'font/woff2' : file.endsWith('.woff') ? 'font/woff' : 'font/ttf'
+      res.writeHead(200, { 'content-type': mime, 'cache-control': 'public, max-age=86400', 'x-content-type-options': 'nosniff' }); res.end(data)
+    } catch (error) { sendJson(res, 404, { ok: false, error: error.message }) }
+  }}), 'dsh-note-changes: vendor route')
 
   // 插件设置：GET 读、POST 写。设置存在 vault 的 00-索引/插件设置.md 里 ⇒ 随 git 迁移，
   // 换机器不用重填。写入只改指定 key，文件其余部分一字不动。
@@ -1087,5 +1113,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.8.0)')
+  console.log('[dsh-note-changes] host up (v1.9.0)')
 }
