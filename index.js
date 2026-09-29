@@ -1,11 +1,10 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.7.0)
+// dsh-note-changes · Host half (v1.8.0)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
-// 设计原则（重要）：
-//   本插件**绝不写入** vault。它只跑 `git log`，不改文件、不提交、不推送。
-//   让 AI 有写权限是另一件事（见 vault 里的 AGENTS.md），不在这里做。
+// 浏览与检索只读；手动保存采用版本检查与原子写入。
+// 日记追加和手动编辑分别保留各自入口，写入后沿用单文件提交同步。
 //
 // 路由：
 //   GET /note-changes/log?vault=<绝对路径>  ->  { ok, vault, commits[] }
@@ -18,6 +17,7 @@
 // ============================================================================
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { createVaultBrowser, notePath } from './lib/vault-browser.mjs'
 
 export const name = 'dsh-note-changes'
 
@@ -26,32 +26,33 @@ export const name = 'dsh-note-changes'
 // 注册不上，前端表现为「响应体为空 → Unexpected end of JSON input」。
 // v1.0.0 漏了这两行（v1.1.0 修）。
 // 诊断依据：harness.log 里的 `[dsh-note-changes] webServer 服务不存在，路由无法注册`。
-export const inject = ['webServer', 'shell', 'tools']
+export const inject = ['webServer', 'shell', 'tools', 'fs']
 
 /** 默认 vault 路径；可以通过路由的 ?vault= 覆盖。 */
 const DEFAULT_VAULT = 'E:/vault'
 
-/** 本插件唯一的路由。 */
+/** 改动历史路由。 */
 const LOG_PATH = '/note-changes/log'
 
 /** 读单篇笔记正文的路由（供抽屉下方「相关笔记」用）。 */
 const NOTE_PATH = '/note-changes/note'
 
 /** 单篇笔记返回的字符上限，防止把超大文件塞进响应。 */
-const MAX_NOTE_CHARS = 60000
 
 /** 插件设置：读写 vault 里这个文件的 frontmatter。 */
 const SETTINGS_PATH = '/note-changes/settings'
 const SETTINGS_REL = '00-索引/插件设置.md'
 
-/** 重试同步的路由（v1.7.0）：本地已有提交、只是当时 push 失败时，手动再推一次。 */
+/** 重试同步的路由（v1.8.0）：本地已有提交、只是当时 push 失败时，手动再推一次。 */
 const SYNC_PATH = '/note-changes/sync'
+const LIBRARY_PATH = '/note-changes/library'
+const SAVE_PATH = '/note-changes/save'
 
 /**
  * 四条路由路径的单一真源。client 半各自硬编码了一份（两半独立打包，不能互相 import），
  * 漂移由 tools/verify-note-changes-routes.mjs 的「client 常量 == ROUTES」断言拦住。
  */
-export const ROUTES = { log: LOG_PATH, note: NOTE_PATH, settings: SETTINGS_PATH, sync: SYNC_PATH }
+export const ROUTES = { log: LOG_PATH, note: NOTE_PATH, settings: SETTINGS_PATH, sync: SYNC_PATH, library: LIBRARY_PATH, save: SAVE_PATH }
 
 /** 设置默认值（设置文件不存在或缺键时用）。 */
 const DEFAULT_SETTINGS = {
@@ -231,7 +232,8 @@ export function patchFrontmatter(text, patch) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = []
-    req.on('data', (c) => chunks.push(c))
+    let bytes = 0
+    req.on('data', (c) => { const chunk=Buffer.from(c); bytes += chunk.length; if (bytes > 1024 * 1024) reject(new Error('请求正文过大')); else chunks.push(chunk) })
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
     req.on('error', reject)
   })
@@ -480,6 +482,7 @@ export async function pushWithRebase(runGit) {
 export async function syncAfterWrite({ runGit, rel, message }) {
   const note = (why) => '（' + why + '）'
   if (typeof runGit !== 'function') return note('未同步：没有可用的 git 执行器')
+  if (/["`$%\r\n]/.test(rel + message)) return note('已本地保存；文件名含特殊字符，请在 Obsidian 中同步')
   try {
     const inside = await runGit(['rev-parse', '--is-inside-work-tree'], 20000)
     if (!inside || inside.code !== 0) return note('未同步：vault 不是 git 仓库')
@@ -487,7 +490,7 @@ export async function syncAfterWrite({ runGit, rel, message }) {
     const add = await runGit(['add', '--', '"' + rel + '"'], 20000)
     if (!add || add.code !== 0) return note('未同步：git add 失败：' + gitDetail(add))
 
-    const commit = await runGit(['commit', '-m', '"' + message + '"'], 20000)
+    const commit = await runGit(['commit', '-m', '"' + message + '"', '--only', '--', '"' + rel + '"'], 20000)
     if (!commit || commit.code !== 0) {
       if (/nothing to commit|no changes added/i.test(gitDetail(commit))) return note('无改动，无需提交')
       return note('已写入，但提交失败：' + gitDetail(commit))
@@ -606,6 +609,7 @@ export async function apply(ctx) {
    * 区别是这里**显式带上沙箱策略**（理由见 vaultSandboxPolicy 的注释）。
    */
   async function runGitIn(vault, args, timeoutMs, lane) {
+    if (/["`$%\r\n]/.test(vault)) return { code: 1, stderr: '笔记库路径含特殊字符，无法安全调用 git' }
     const shell = ctx.get('shell')
     if (shell === undefined) throw new Error('Host 未提供 shell 服务')
     const spec = shell.resolve({
@@ -631,11 +635,11 @@ export async function apply(ctx) {
 
   /** 写完一个文件后立刻提交推送；附注（成功或失败原因）交给调用方回报，永不抛。 */
   async function syncWrittenFile(vault, rel, message) {
-    const note = await syncAfterWrite({
+    const note = await withWriteLock('git:' + vault, () => syncAfterWrite({
       runGit: (args, timeoutMs, lane) => runGitIn(vault, args, timeoutMs, lane),
       rel,
       message,
-    })
+    }))
     // 成功回执以'，'开头，失败是'（…）'（见 syncAfterWrite 的返回值约定）。
     // 用这个判据而不是改返回形状 —— 那个形状已被 tools/verify-git-sync.mjs 钉死。
     lastSync = { at: new Date().toISOString(), vault, rel, ok: note.charAt(0) === '，', note }
@@ -730,105 +734,52 @@ export async function apply(ctx) {
         const seed = await resolveVault(asked, ctx.get('fs'))
         const vault = seed.vault
 
-        const shell = ctx.get('shell')
-        if (shell === undefined) {
-          sendJson(res, 200, {
-            ok: false,
-            vault,
-            error: 'Host 未提供 shell 服务，无法执行 git。',
-          })
+        const result = await runGitIn(vault, ['log', '-n', String(MAX_COMMITS), '--date=short', '--name-only'], 20000)
+        if (!result || result.code !== 0) {
+          sendJson(res, 200, { ok: false, vault, vaultSource: seed.source, error: gitDetail(result) })
           return
         }
-
-        const command = 'git -c core.quotepath=false -C "' + vault + '" log -n '
-          + String(MAX_COMMITS) + ' --date=short --name-only'
-
-        let result
-        try {
-          const spec = shell.resolve({
-            command,
-            workdir: vault,
-            timeoutMs: 20000,
-            stdoutMaxBytes: 600000,
-          })
-          result = await shell.run(spec)
-        } catch (error) {
-          const message = (error && error.message) ? error.message : String(error)
-          sendJson(res, 200, { ok: false, vault, vaultSource: seed.source, error: '执行 git 失败：' + message })
-          return
-        }
-
-        const stdout = result && result.stdout ? String(result.stdout.text || '') : ''
-        const stderr = result && result.stderr ? String(result.stderr.text || '') : ''
-        const code = result ? result.exitCode : null
-
-        if (code !== 0) {
-          const detail = (stderr || stdout || ('git 退出码 ' + String(code))).trim()
-          sendJson(res, 200, { ok: false, vault, vaultSource: seed.source, error: detail.slice(0, 800) })
-          return
-        }
-
-        sendJson(res, 200, { ok: true, vault, vaultSource: seed.source, commits: parseLog(stdout) })
+        sendJson(res, 200, { ok: true, vault, vaultSource: seed.source, commits: parseLog(result.stdout) })
       } catch (err) {
         sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
       }
     },
   }), 'dsh-note-changes: log route')
 
-  // 读一篇笔记的正文，给抽屉下方「相关笔记」用。
-  // 只读、且严格限制在 vault 内的 .md：拒绝 .. 越界、拒绝非 md、截断超长文件。
-  ctx.effect(() => webServer.register({
-    kind: 'exact',
-    path: NOTE_PATH,
-    handler: async (req, res) => {
+  const browser = createVaultBrowser(ctx.get('fs'))
+  for (const [route, action] of [[NOTE_PATH, 'read'], [LIBRARY_PATH, 'list']]) {
+    ctx.effect(() => webServer.register({ kind: 'exact', path: route, handler: async (req, res) => {
       try {
-        const askedVault = queryParam(req.url, 'vault')
-        const askedPath = queryParam(req.url, 'path')
+        const seed = await resolveVault(queryParam(req.url, 'vault'), ctx.get('fs'))
+        if (queryParam(req.url, 'refresh') === '1') browser.invalidate()
+        const result = await browser[action](seed.vault, queryParam(req.url, action === 'read' ? 'path' : 'q'))
+        sendJson(res, 200, { ok: true, vault: seed.vault, vaultSource: seed.source, ...result })
+      } catch (error) { sendJson(res, 200, { ok: false, error: error.message }) }
+    }}), 'dsh-note-changes: ' + action + ' route')
+  }
 
-        const seed = await resolveVault(askedVault, ctx.get('fs'))
-        const vault = seed.vault
-        const relative = askedPath.replace(/\\/g, '/').replace(/^\/+/, '').trim()
-
-        if (relative.length === 0) {
-          sendJson(res, 200, { ok: false, error: '缺少 path 参数' })
-          return
-        }
-        if (relative.split('/').indexOf('..') >= 0) {
-          sendJson(res, 200, { ok: false, error: '路径不允许包含 ..' })
-          return
-        }
-        if (!/\.md$/i.test(relative)) {
-          sendJson(res, 200, { ok: false, error: '只读取 .md 文件' })
-          return
-        }
-
-        const fsService = ctx.get('fs')
-        if (fsService === undefined) {
-          sendJson(res, 200, { ok: false, error: 'Host 未提供 fs 服务，无法读取笔记正文。' })
-          return
-        }
-
-        const base = vault.replace(/\/+$/, '')
-        const target = await fsService.resolve(base + '/' + relative)
-        const info = await fsService.stat(target)
-        if (!info) {
-          sendJson(res, 200, { ok: false, error: '文件不存在：' + relative })
-          return
-        }
-
-        const raw = String(await fsService.readText(target) || '')
-        const text = raw.slice(0, MAX_NOTE_CHARS)
-        sendJson(res, 200, {
-          ok: true,
-          path: relative,
-          text,
-          truncated: text.length < raw.length,
-        })
-      } catch (err) {
-        sendJson(res, 200, { ok: false, error: String((err && err.message) || err) })
+  ctx.effect(() => webServer.register({ kind: 'exact', path: SAVE_PATH, handler: async (req, res) => {
+    try {
+      if (req.method !== 'POST' || req.headers?.['x-dnc-editor'] !== '1' || !String(req.headers?.['content-type']).startsWith('application/json')) {
+        sendJson(res, 403, { ok: false, error: '请从笔记编辑器保存' }); return
       }
-    },
-  }), 'dsh-note-changes: note route')
+      const origin = req.headers.origin
+      if (origin && new URL(origin).host !== req.headers.host) { sendJson(res, 403, { ok: false, error: '来源不匹配' }); return }
+      const payload = JSON.parse(await readBody(req))
+      const seed = await resolveVault(queryParam(req.url, 'vault'), ctx.get('fs'))
+      const rel = notePath(payload.path)
+      // The same lock key is shared with the diary append route.
+      const result = await withWriteLock(seed.vault + '/' + rel, async () => {
+        const saved = await browser.save(seed.vault, rel, payload.text, payload.revision)
+        const sync = saved.changed ? await syncWrittenFile(seed.vault, rel, '编辑笔记') : ''
+        return { ...saved, sync, lastSync: saved.changed ? lastSync : null }
+      })
+      sendJson(res, 200, { ok: true, ...result })
+    } catch (error) {
+      const conflict = error.code === 'CONFLICT' || error.code === 'FS_STALE_VERSION'
+      sendJson(res, conflict ? 409 : 400, { ok: false, conflict, error: error.message })
+    }
+  }}), 'dsh-note-changes: save route')
 
   // 插件设置：GET 读、POST 写。设置存在 vault 的 00-索引/插件设置.md 里 ⇒ 随 git 迁移，
   // 换机器不用重填。写入只改指定 key，文件其余部分一字不动。
@@ -921,7 +872,7 @@ export async function apply(ctx) {
     },
   }), 'dsh-note-changes: settings route')
 
-  // 重试同步（v1.7.0）：写完即同步失败后（网络/沙箱，见 v1.6.x），提交已经躺在本地了，
+  // 重试同步（v1.8.0）：写完即同步失败后（网络/沙箱，见 v1.6.x），提交已经躺在本地了，
   // 这里只重推、不重提交。syncAfterWrite 顶不住这个场景 —— 没有新改动时它返回
   // 「无改动，无需提交」并在那一步就 return，永远走不到 push。
   ctx.effect(() => webServer.register({
@@ -1082,7 +1033,7 @@ export async function apply(ctx) {
     },
   }), 'dsh-note-changes: vault_note_append tool')
 
-  // ---- 模型工具：查自己以前记过什么（v1.7.0）----
+  // ---- 模型工具：查自己以前记过什么（v1.8.0）----
   // 为什么需要它：上面那条写入工具的规则要求"同类型的坑并入既有条目"，但 AI 看不到自己
   // 几天前写过什么 —— 没有这条读路，"并入"只能靠猜（结果就是同一个坑反复新开条目）。
   // 用 `git grep`（只读）而不是遍历目录：不动任何文件、不引新的 fs API，
@@ -1136,5 +1087,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.7.0)')
+  console.log('[dsh-note-changes] host up (v1.8.0)')
 }

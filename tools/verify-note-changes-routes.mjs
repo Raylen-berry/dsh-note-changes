@@ -115,7 +115,7 @@ const resetGit = () => { calls.git.length = 0; gitQueue = [] }
 
 console.log('— 0. 四条路由都注册上了，且注册顺序/路径与导出的 ROUTES 一致 —')
 for (const [key, p] of Object.entries(ROUTES)) ok('ROUTES.' + key + ' = ' + p + ' 已注册', typeof routes[p] === 'function')
-ok('恰好四条（多一条少一条都要改这里）', Object.keys(ROUTES).length === 4, String(Object.keys(ROUTES).length))
+ok('六条工作区路由全部注册', Object.keys(ROUTES).length === 6, String(Object.keys(ROUTES).length))
 if (Object.keys(routes).length === 0) { console.log('\n结果：' + pass + ' / ' + (fail + 1)); process.exit(1) }
 
 console.log('\n— 1. log：编码过的 ?vault= 解码正确 —')
@@ -289,7 +289,7 @@ ok('LOG_PATH 对齐 ROUTES.log', internals.LOG_PATH === ROUTES.log, String(inter
 ok('NOTE_PATH 对齐 ROUTES.note', internals.NOTE_PATH === ROUTES.note, String(internals.NOTE_PATH))
 ok('SETTINGS_PATH 对齐 ROUTES.settings', internals.SETTINGS_PATH === ROUTES.settings, String(internals.SETTINGS_PATH))
 ok('SYNC_PATH 对齐 ROUTES.sync', internals.SYNC_PATH === ROUTES.sync, String(internals.SYNC_PATH))
-ok('client 用 POST 打 sync', /fetch\(withQuery\(SYNC_PATH\), \{ method: 'POST'/.test(clientText))
+ok('client 用 POST 打 sync', /api\(url\(SYNC_PATH,\s*vault\),\s*\{\s*method:\s*'POST'/.test(clientText))
 // 外部协议链接在这个 GUI 里永远点不动（桌面版 secureWindow 只放行 http/https），
 // 所以钉住"别再把 obsidian:// 之类的死链接塞回来"；真要跳转得 Host 半去 shell.openExternal。
 ok('client 里没有点不动的外部协议链接', !/href:\s*['"]?(obsidian|vscode|file):/i.test(clientText))

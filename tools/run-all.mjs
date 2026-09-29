@@ -17,12 +17,14 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const LIST_ONLY = process.argv.includes('--list')
 
 // ---- 仓库配置 -------------------------------------------------------------
-const CHECKS = []
+const CHECKS = ['index.js', 'client.js', 'lib/vault-browser.mjs']
 
 const SUITES = [
   'tools/verify-append-lock.mjs',
   'tools/verify-git-sync.mjs',
   'tools/verify-note-changes-routes.mjs',
+  'tools/verify-workspace.mjs',
+  'tools/verify-git-file-scope.mjs',
 ]
 
 const EXCLUDED = []

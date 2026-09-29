@@ -117,12 +117,12 @@ const body = (rel, message) => ({ runGit: null, rel, message })
   ok('add 失败 → 报未同步且不再往下走', /未同步：git add 失败/.test(note) && r.seen.length === 2, note)
 }
 {
-  const r = recorder({ ['commit -m "m"']: { code: 1, stdout: 'nothing to commit, working tree clean' } })
+  const r = recorder({ ['commit -m "m" --only -- "' + REL + '"']: { code: 1, stdout: 'nothing to commit, working tree clean' } })
   const note = await mod.syncAfterWrite({ ...body(REL, 'm'), runGit: r.runGit })
   ok('无改动 → 「无改动，无需提交」，不当错误', note === '（无改动，无需提交）' && r.seen.length === 3, note)
 }
 {
-  const r = recorder({ ['commit -m "m"']: { code: 1, stderr: 'fatal: unable to auto-detect email address' } })
+  const r = recorder({ ['commit -m "m" --only -- "' + REL + '"']: { code: 1, stderr: 'fatal: unable to auto-detect email address' } })
   const note = await mod.syncAfterWrite({ ...body(REL, 'm'), runGit: r.runGit })
   ok('提交真失败（如没配 identity）→ 明说已写入但提交失败', /已写入，但提交失败/.test(note), note)
 }
