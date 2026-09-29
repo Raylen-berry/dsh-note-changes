@@ -1,3 +1,15 @@
+/* Keep the native conversation scrollport bounded while this workspace is open. */
+[data-conversation-scroll]:has([data-dnc-workspace]) {
+  overflow: hidden;
+}
+[data-conversation-scroll] [data-slot='conversation.session']:has([data-dnc-workspace]),
+[data-conversation-scroll] [data-slot='conversation.session']:has([data-dnc-workspace]) > div,
+[data-conversation-scroll] [data-slot='conversation.view']:has([data-dnc-workspace]) {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
 .dnc-workspace {
   position: relative;
   --nc-bg: var(--dsw-alias-bg-base, #f6f5f2);
@@ -401,6 +413,7 @@
   padding: 14px 22px;
   border-bottom: 1px solid var(--nc-line);
   flex-wrap: wrap;
+  flex: none;
 }
 .dnc-brand {
   font-size: 17px;
@@ -427,8 +440,32 @@
 }
 .dnc-left,
 .dnc-right {
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
   padding: 18px 12px;
+}
+.dnc-left > * {
+  flex-shrink: 0;
+}
+.dnc-left > .dnc-filelist,
+.dnc-side-list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.dnc-filelist,
+.dnc-side-list {
+  padding: 2px;
+}
+.dnc-left .dnc-filters {
+  max-height: 150px;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 .dnc-left {
   border-right: 1px solid var(--nc-line);
@@ -493,6 +530,7 @@
   background: var(--nc-panel);
 }
 .dnc-documentbar {
+  flex: none;
   min-height: 49px;
   display: flex;
   align-items: center;
@@ -615,7 +653,7 @@
   display: block;
   resize: none;
   flex: 1;
-  min-height: 240px;
+  min-height: 0;
   width: 100%;
   padding: 26px 32px;
   border: 0;
@@ -627,7 +665,21 @@
   outline-offset: -3px !important;
 }
 .dnc-right section {
-  margin-bottom: 25px;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  margin-bottom: 18px;
+  overflow: hidden;
+}
+.dnc-right section:first-child {
+  flex-grow: 2;
+}
+.dnc-right section:last-child {
+  margin-bottom: 0;
+}
+.dnc-right .dnc-label {
+  flex: none;
 }
 .dnc-right button {
   font-size: 12px;
@@ -646,6 +698,7 @@
   font-weight: 550;
 }
 .dnc-footer {
+  flex: none;
   padding: 7px 18px;
   border-top: 1px solid var(--nc-line);
   display: flex;
@@ -729,13 +782,13 @@
   }
   .dnc-left {
     display: none;
-    max-height: 42vh;
+    height: min(42vh, 360px);
     border-right: 0;
     border-bottom: 1px solid var(--nc-line);
     flex-shrink: 0;
   }
   .dnc-left[data-open='true'] {
-    display: block;
+    display: flex;
   }
   .dnc-center {
     flex: 1;

@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.10.0)
+// dsh-note-changes · Host half (v1.10.1)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -1157,5 +1157,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.10.0)')
+  console.log('[dsh-note-changes] host up (v1.10.1)')
 }

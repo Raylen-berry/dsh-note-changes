@@ -960,29 +960,33 @@ function apply(ctx) {
                     { className: 'dnc-label' },
                     (search ? '搜索结果' : '文件目录') + ' · ' + filtered.length,
                   ),
-                  h(ErrorBox, { text: library.error || results.error }),
-                  library.loading
-                    ? h('p', { className: 'dnc-notice' }, '正在读取笔记库…')
-                    : search || shelf === 'recent'
-                      ? results.loading
-                        ? h('p', null, '正在搜索…')
+                  h(
+                    'div',
+                    { className: 'dnc-filelist', tabIndex: 0, role: 'region', 'aria-label': '笔记列表' },
+                    h(ErrorBox, { text: library.error || results.error }),
+                    library.loading
+                      ? h('p', { className: 'dnc-notice' }, '正在读取笔记库…')
+                      : search || shelf === 'recent'
+                        ? results.loading
+                          ? h('p', null, '正在搜索…')
+                          : filtered.length
+                            ? filtered.map((n) =>
+                                h(
+                                  Button,
+                                  {
+                                    className: 'dnc-result',
+                                    key: n.path,
+                                    onClick: () => open(n.path),
+                                  },
+                                  n.title,
+                                  h('small', null, n.excerpt),
+                                ),
+                              )
+                            : h('p', { className: 'dnc-notice' }, '没有匹配的笔记')
                         : filtered.length
-                          ? filtered.map((n) =>
-                              h(
-                                Button,
-                                {
-                                  className: 'dnc-result',
-                                  key: n.path,
-                                  onClick: () => open(n.path),
-                                },
-                                n.title,
-                                h('small', null, n.excerpt),
-                              ),
-                            )
-                          : h('p', { className: 'dnc-notice' }, '没有匹配的笔记')
-                      : filtered.length
-                        ? h(Tree, { notes: filtered, current: selected, onOpen: open })
-                        : h('p', { className: 'dnc-notice' }, '这个集合还没有笔记'),
+                          ? h(Tree, { notes: filtered, current: selected, onOpen: open })
+                          : h('p', { className: 'dnc-notice' }, '这个集合还没有笔记'),
+                  ),
                 ),
                 h(
                   'main',
@@ -1144,18 +1148,22 @@ function apply(ctx) {
                     'section',
                     null,
                     h('div', { className: 'dnc-label' }, '本篇大纲'),
-                    (note?.headings || []).map((item, i) =>
-                      h(
-                        Button,
-                        {
-                          key: i,
-                          style: { paddingLeft: (item.level - 1) * 8 },
-                          onClick: () => {
-                            setEditing(false)
-                            setTimeout(() => jumpHeading(item.text), 0)
+                    h(
+                      'div',
+                      { className: 'dnc-side-list', tabIndex: 0, role: 'region', 'aria-label': '本篇大纲列表' },
+                      (note?.headings || []).map((item, i) =>
+                        h(
+                          Button,
+                          {
+                            key: i,
+                            style: { paddingLeft: (item.level - 1) * 8 },
+                            onClick: () => {
+                              setEditing(false)
+                              setTimeout(() => jumpHeading(item.text), 0)
+                            },
                           },
-                        },
-                        item.text,
+                          item.text,
+                        ),
                       ),
                     ),
                   ),
@@ -1163,21 +1171,29 @@ function apply(ctx) {
                     'section',
                     null,
                     h('div', { className: 'dnc-label' }, '链接到'),
-                    outbound.length
-                      ? outbound.map((link) =>
-                          h(Button, { key: link, onClick: () => follow(link) }, link),
-                        )
-                      : h('span', { className: 'dnc-notice' }, '还没有双链'),
+                    h(
+                      'div',
+                      { className: 'dnc-side-list', tabIndex: 0, role: 'region', 'aria-label': '出站链接列表' },
+                      outbound.length
+                        ? outbound.map((link) =>
+                            h(Button, { key: link, onClick: () => follow(link) }, link),
+                          )
+                        : h('span', { className: 'dnc-notice' }, '还没有双链'),
+                    ),
                   ),
                   h(
                     'section',
                     null,
                     h('div', { className: 'dnc-label' }, '反向链接 · ' + backlinks.length),
-                    backlinks.map((n) =>
-                      h(
-                        Button,
-                        { key: n.path, title: n.path, onClick: () => open(n.path) },
-                        noteLabel(n.path),
+                    h(
+                      'div',
+                      { className: 'dnc-side-list', tabIndex: 0, role: 'region', 'aria-label': '反向链接列表' },
+                      backlinks.map((n) =>
+                        h(
+                          Button,
+                          { key: n.path, title: n.path, onClick: () => open(n.path) },
+                          noteLabel(n.path),
+                        ),
                       ),
                     ),
                   ),
@@ -1229,7 +1245,7 @@ function apply(ctx) {
       },
     ),
   )
-  console.log('[dsh-note-changes] client up (v1.10.0)')
+  console.log('[dsh-note-changes] client up (v1.10.1)')
 }
 exports.name = 'dsh-note-changes'
 exports.inject = ['slots']
