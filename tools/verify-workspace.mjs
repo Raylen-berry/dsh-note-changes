@@ -134,6 +134,16 @@ try {
     assert.equal(r.status, 409)
     assert.equal(f.commands.length, n)
   })
+  await check('同步接口拒绝无编辑标记或跨站的上传请求', async () => {
+    const beforeCommands = f.commands.length
+    const missing = await request('/note-changes/transfer', { direction: 'upload' })
+    const foreign = await request('/note-changes/transfer', { direction: 'upload' }, {
+      'x-dnc-editor': '1', 'content-type': 'application/json', origin: 'http://evil.test', host: 'localhost:5000',
+    })
+    assert.equal(missing.body.ok, false)
+    assert.equal(foreign.body.ok, false)
+    assert.equal(f.commands.length, beforeCommands)
+  })
   console.log(`${count} 组工作区测试通过`)
 } finally {
   await f.close()

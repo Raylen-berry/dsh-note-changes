@@ -91,17 +91,33 @@ export async function fixture(options = {}) {
               commands.push(s.command)
               return {
                 result: async () =>
-                  options.shellResult
-                    ? options.shellResult(s)
-                    : {
-                        exitCode: 0,
-                        stdout: {
-                          text: s.command.includes(' log ')
-                            ? 'commit 0123456789012345678901234567890123456789\nAuthor: Local\nDate:   2026-09-29\n\n    整理了今天的灵感\n\n想法/灵感花园.md\n日记/今天.md\n'
-                            : 'true',
-                        },
-                        stderr: { text: '' },
-                      },
+                  options.shellResult?.(s) ?? {
+                    exitCode: 0,
+                    stdout: {
+                      text: s.command.includes('--show-toplevel')
+                        ? s.workdir
+                        : s.command.includes('symbolic-ref')
+                          ? 'main'
+                          : s.command.includes(' config --get ')
+                            ? s.command.includes('.remote')
+                              ? 'origin'
+                              : 'refs/heads/main'
+                            : s.command.includes('remote get-url')
+                              ? 'https://github.com/example/notes.git'
+                              : s.command.includes('--symbolic-full-name')
+                                ? 'origin/main'
+                                : s.command.includes('rev-list')
+                                  ? '0\t0'
+                                  : s.command.includes('--porcelain')
+                                    ? ''
+                                    : s.command.includes('--git-path')
+                                      ? '.git/' + s.command.split(' ').at(-1)
+                                      : s.command.includes(' log ')
+                                        ? 'commit 0123456789012345678901234567890123456789\nAuthor: Local\nDate:   2026-09-29\n\n    整理了今天的灵感\n\n想法/灵感花园.md\n日记/今天.md\n'
+                                        : 'true',
+                    },
+                    stderr: { text: '' },
+                  },
               }
             },
           }

@@ -2,6 +2,7 @@ var LOG_PATH = '/note-changes/log',
   NOTE_PATH = '/note-changes/note',
   SETTINGS_PATH = '/note-changes/settings',
   SYNC_PATH = '/note-changes/sync',
+  TRANSFER_PATH = '/note-changes/transfer',
   LIBRARY_PATH = '/note-changes/library',
   SAVE_PATH = '/note-changes/save',
   CREATE_PATH = '/note-changes/create',
@@ -154,30 +155,178 @@ function apply(ctx) {
     return pair[0]
   }
 
-  function Settings({ vault, connectionRevision = 0 }) {
+  function SyncPanel({ vault, revision = 0, dirty = false, onUpdated }) {
+    var [tick, setTick] = React.useState(0),
+      state = useResource(TRANSFER_PATH, vault, {}, revision + tick),
+      [busy, setBusy] = React.useState(''),
+      [message, setMessage] = React.useState(''),
+      [error, setError] = React.useState(''),
+      currentVault = React.useRef(vault)
+    currentVault.current = vault
+    React.useEffect(() => {
+      setMessage('')
+      setError('')
+    }, [vault])
+    async function transfer(direction) {
+      setError('')
+      if (dirty) {
+        setError('请先保存正在编辑的草稿，再同步笔记。')
+        return
+      }
+      setBusy(direction)
+      setMessage(direction === 'download' ? '正在下载远端更新…' : '正在上传本机笔记…')
+      try {
+        var result = await api(url(TRANSFER_PATH, vault), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-dnc-editor': '1' },
+          body: JSON.stringify({ direction }),
+        })
+        if (currentVault.current === vault) setMessage(result.message)
+      } catch (e) {
+        if (currentVault.current === vault) {
+          setMessage('')
+          setError(e.message)
+        }
+      } finally {
+        setBusy('')
+        setTick((n) => n + 1)
+        // Pull/rebase can update files even if a subsequent push fails.
+        override = { ...override, revision: override.revision + 1 }
+        listeners.forEach((f) => f(override))
+        if (onUpdated) onUpdated()
+      }
+    }
+    var info = state.data?.state
+    return h(
+      'section',
+      { className: 'dnc-sync', 'aria-label': 'GitHub 笔记同步', 'aria-busy': !!busy },
+      h(
+        'div',
+        { className: 'dnc-sync-bar' },
+        h(
+          'span',
+          { className: 'dnc-sync-label' },
+          '⇄ GitHub',
+          h(
+            'small',
+            null,
+            info
+              ? info.pending + ' 个本机改动 · ' + info.ahead + ' 个待上传提交'
+              : '连接本机笔记仓库',
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dnc-actions' },
+          h(
+            Button,
+            { disabled: !!busy, onClick: () => transfer('download') },
+            busy === 'download' ? '下载中…' : '↓ 下载更新',
+          ),
+          h(
+            Button,
+            { className: 'dnc-primary', disabled: !!busy, onClick: () => transfer('upload') },
+            busy === 'upload' ? '上传中…' : '↑ 上传笔记',
+          ),
+        ),
+      ),
+      h(ErrorBox, {
+        text:
+          error ||
+          state.error ||
+          (!message && state.data?.lastSync?.ok === false ? state.data.lastSync.note : ''),
+      }),
+      message || state.data?.lastSync?.ok
+        ? h(
+            'p',
+            { role: 'status', className: 'dnc-sync-message' },
+            message || state.data.lastSync.note,
+          )
+        : null,
+      h(
+        'details',
+        { className: 'dnc-sync-details' },
+        h('summary', null, '同步范围与使用方法'),
+        h(
+          'p',
+          null,
+          '开始使用这台电脑 → 下载更新；写完笔记 → 上传笔记；换一台电脑 → 再下载更新。两台电脑连接同一个 GitHub 仓库，本机路径可以不同。',
+        ),
+        h(
+          'p',
+          null,
+          '上传 Markdown 和常见图片、音频、视频、PDF 附件（单个不超过 20 MB），包含已跟踪文件的删除。隐藏目录、忽略文件及其他类型不自动提交；已有 Git 提交会随分支上传。编辑器保存仍会自动同步当前笔记。',
+        ),
+        h(
+          'p',
+          null,
+          '首次使用另一台电脑：先把同一个 GitHub 笔记仓库克隆到本机，再在设置里连接该文件夹。',
+        ),
+        info
+          ? h(
+              React.Fragment,
+              null,
+              h('p', { className: 'dnc-sync-remote' }, info.remote + ' · ' + info.branch),
+              h(
+                'p',
+                null,
+                '远端比本机多 ' +
+                  info.behind +
+                  ' 个提交（按最近一次获取的远端状态；点击同步时会重新检查）。',
+              ),
+              h(
+                'ul',
+                null,
+                info.changes
+                  .slice(0, 80)
+                  .map((c) =>
+                    h(
+                      'li',
+                      { key: c.path },
+                      (c.included ? (c.status.includes('D') ? '删除 · ' : '上传 · ') : '跳过 · ') +
+                        c.path +
+                        (c.reason ? ' — ' + c.reason : ''),
+                    ),
+                  ),
+              ),
+              info.changes.length > 80
+                ? h('p', null, '还有 ' + (info.changes.length - 80) + ' 项')
+                : null,
+            )
+          : null,
+      ),
+    )
+  }
+  function Settings({ vault, connectionRevision = 0, standalone = false }) {
     var [revision, setRevision] = React.useState(0),
       state = useResource(SETTINGS_PATH, vault, {}, revision + connectionRevision),
+      [mode, setMode] = React.useState(vault ? 'custom' : 'local'),
       [draft, setDraft] = React.useState(vault),
       [busy, setBusy] = React.useState(false),
       [message, setMessage] = React.useState(''),
       [connectionMessage, setConnectionMessage] = React.useState(''),
-      [error, setError] = React.useState('')
-    React.useEffect(() => setDraft(vault), [vault])
+      [error, setError] = React.useState(''),
+      id = React.useId()
+    React.useEffect(() => {
+      setDraft(vault)
+      setMode(vault ? 'custom' : 'local')
+    }, [vault])
     var settings = state.data?.settings || {}
-    async function connect(value, follow) {
-      var next = value.trim().replace(/\\/g, '/').replace(/\/+$/, '')
-      setBusy(follow ? 'follow' : 'connect')
+    async function connect() {
+      var next = mode === 'local' ? '' : draft.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+      setBusy(true)
       setError('')
       setConnectionMessage('正在检查笔记库…')
       try {
+        if (mode === 'custom' && !next)
+          throw new Error('指定文件夹不能为空，请填写笔记库的完整路径')
         if (next && !/^(?:[a-z]:\/|\/)/i.test(next))
           throw new Error('请输入完整路径，例如 D:/DeepSeek/vault')
         var result = await api(url(LIBRARY_PATH, next, { refresh: '1' }))
         setVault(next, result.vault)
-        setDraft(next)
         setMessage('')
         setConnectionMessage(
-          (follow || !next ? '已跟随本机配置：' : '已连接：') +
+          (mode === 'local' ? '已跟随本机配置：' : '已连接指定文件夹：') +
             result.vault +
             ' · ' +
             result.total +
@@ -191,7 +340,7 @@ function apply(ctx) {
       }
     }
     async function update(patch) {
-      setBusy('settings')
+      setBusy(true)
       setError('')
       try {
         await api(url(SETTINGS_PATH, vault), {
@@ -207,21 +356,6 @@ function apply(ctx) {
         setBusy(false)
       }
     }
-    async function sync() {
-      setBusy('sync')
-      setError('')
-      setMessage('正在推送已有提交…')
-      try {
-        var result = await api(url(SYNC_PATH, vault), { method: 'POST' })
-        setMessage(result.message || '已同步')
-      } catch (e) {
-        setError(e.message)
-        setMessage('推送未完成；本地笔记仍保留。')
-      } finally {
-        setRevision((n) => n + 1)
-        setBusy(false)
-      }
-    }
     return h(
       'div',
       { className: 'dnc-page' },
@@ -229,47 +363,74 @@ function apply(ctx) {
       h(
         'p',
         { className: 'dnc-notice' },
-        '连接你的本地 Obsidian 笔记库，浏览和编辑普通 Markdown 文件。',
+        '选择这台电脑上的 Obsidian 笔记库。连接方式只保存在本机，不会覆盖另一台电脑的路径。',
       ),
       h(ErrorBox, { text: error || state.error }),
       h(
         'section',
         { className: 'dnc-setting' },
-        h('h3', null, '笔记库'),
-        h('label', { htmlFor: 'dnc-vault' }, '本机路径'),
-        h('input', {
-          id: 'dnc-vault',
-          type: 'text',
-          value: draft,
-          disabled: !!busy,
-          onChange: (e) => setDraft(e.target.value),
-          placeholder: state.data?.vaultPath || '留空，跟随本机配置',
-        }),
-        h('p', null, '当前：' + (state.data?.vaultPath || vault || '等待连接')),
+        h('h3', null, '连接方式'),
+        h(
+          'div',
+          { className: 'dnc-connection-modes', role: 'radiogroup', 'aria-label': '连接方式' },
+          [
+            ['local', '跟随本机配置', '读取 Desktop 为这台电脑配置的笔记库路径'],
+            ['custom', '指定笔记库文件夹', '使用下方填写的本机路径'],
+          ].map(([value, label, hint]) =>
+            h(
+              'label',
+              { key: value, 'data-selected': mode === value },
+              h('input', {
+                type: 'radio',
+                name: id,
+                value,
+                checked: mode === value,
+                disabled: !!busy,
+                onChange: () => {
+                  setMode(value)
+                  setConnectionMessage('')
+                  setError('')
+                },
+              }),
+              h('span', null, label, h('small', null, hint)),
+            ),
+          ),
+        ),
+        mode === 'custom'
+          ? h(
+              React.Fragment,
+              null,
+              h('label', { htmlFor: id + '-vault' }, '本机路径'),
+              h('input', {
+                id: id + '-vault',
+                type: 'text',
+                value: draft,
+                disabled: !!busy,
+                onChange: (e) => setDraft(e.target.value),
+                placeholder: '例如 D:/DeepSeek/vault',
+              }),
+            )
+          : null,
         h(
           'p',
-          { className: 'dnc-notice' },
-          '连接笔记库会检查并记住当前窗口使用的路径；跟随本机配置会重新读取 Desktop 的本机路径设置。',
+          { 'data-dnc-active-connection': true },
+          '当前生效：' +
+            (vault ? '指定文件夹' : '跟随本机配置') +
+            ' · ' +
+            (state.data?.vaultPath || vault || '正在读取…'),
         ),
         h(
           Button,
-          { className: 'dnc-primary', disabled: !!busy, onClick: () => connect(draft, false) },
-          busy === 'connect' ? '正在连接…' : '连接笔记库',
-        ),
-        h(
-          Button,
-          {
-            disabled: !!busy,
-            onClick: () => connect('', true),
-          },
-          busy === 'follow' ? '正在读取配置…' : '跟随本机配置',
+          { className: 'dnc-primary', disabled: !!busy, onClick: connect },
+          busy ? '正在检查…' : '应用连接',
         ),
         h('p', { role: 'status', 'data-dnc-connection-status': true }, connectionMessage),
       ),
+      standalone ? h(SyncPanel, { vault, revision: connectionRevision }) : null,
       h(
         'section',
         { className: 'dnc-setting' },
-        h('h3', null, '记录与同步'),
+        h('h3', null, '会话记录'),
         h(
           'label',
           null,
@@ -279,7 +440,7 @@ function apply(ctx) {
             disabled: busy || !state.data,
             onChange: (e) => update({ scanVault: e.target.checked }),
           }),
-          '允许 AI 读取笔记上下文',
+          '允许检索笔记',
         ),
         h(
           'label',
@@ -292,13 +453,11 @@ function apply(ctx) {
           }),
           '会话结束时记录要点',
         ),
-        h('p', null, '手动保存会保留全文与双链，并只提交当前文件。同步失败时，本地内容仍然保留。'),
         h(
-          Button,
-          { disabled: !!busy || !state.data, onClick: sync },
-          busy === 'sync' ? '正在推送…' : '重试推送',
+          'p',
+          { role: 'status' },
+          message || state.data?.lastSync?.note || '本地保存和同步结果会在这里显示。',
         ),
-        h('p', { role: 'status' }, message || state.data?.lastSync?.note || '还没有同步回执'),
       ),
     )
   }
@@ -640,7 +799,7 @@ function apply(ctx) {
       h(
         'header',
         { className: 'dnc-top' },
-        h('div', { className: 'dnc-brand' }, '笔记库', h('small', null, 'OBSIDIAN WORKSPACE')),
+        h('div', { className: 'dnc-brand' }, '笔记', h('small', null, 'OBSIDIAN WORKSPACE')),
         h(
           'nav',
           { 'aria-label': '笔记栏目' },
@@ -654,6 +813,12 @@ function apply(ctx) {
         ),
         h(Button, { title: '刷新目录和搜索索引', onClick: () => setRefresh((n) => n + 1) }, '刷新'),
       ),
+      h(SyncPanel, {
+        vault,
+        revision: connection.revision + refresh,
+        dirty: dirty || saving,
+        onUpdated: () => setNoteRefresh((n) => n + 1),
+      }),
       tab === 'settings'
         ? h(Settings, { vault, connectionRevision: connection.revision })
         : tab === 'history'
@@ -1041,24 +1206,10 @@ function apply(ctx) {
         : null,
     )
   }
-  slots.inject('main', () => slots.register({ name: 'main', key: 'notes' }, Workspace))
-  slots.inject('sidebar.panellist', () =>
-    slots.register({ name: 'sidebar.panellist', id: 'notes', order: 45, label: '笔记库' }, () =>
-      h(
-        'svg',
-        {
-          width: 18,
-          height: 18,
-          viewBox: '0 0 24 24',
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: 1.6,
-          'aria-hidden': true,
-        },
-        h('path', {
-          d: 'M5 3h11a3 3 0 0 1 3 3v15H7a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3m0 0v14m-3 1a2 2 0 0 1 2-2h13M10 7h6m-6 4h5',
-        }),
-      ),
+  slots.inject('conversation.view', () =>
+    slots.register(
+      { name: 'conversation.view', id: 'note-workspace', order: 40, label: '笔记' },
+      Workspace,
     ),
   )
   slots.inject('settings.section', () =>
@@ -1069,12 +1220,16 @@ function apply(ctx) {
         return h(
           'div',
           { className: 'dnc-workspace' },
-          h(Settings, { vault: connection.path, connectionRevision: connection.revision }),
+          h(Settings, {
+            vault: connection.path,
+            connectionRevision: connection.revision,
+            standalone: true,
+          }),
         )
       },
     ),
   )
-  console.log('[dsh-note-changes] client up (v1.9.1)')
+  console.log('[dsh-note-changes] client up (v1.10.0)')
 }
 exports.name = 'dsh-note-changes'
 exports.inject = ['slots']
@@ -1092,6 +1247,7 @@ exports.internals = {
   NOTE_PATH,
   SETTINGS_PATH,
   SYNC_PATH,
+  TRANSFER_PATH,
   LIBRARY_PATH,
   SAVE_PATH,
   resolveLinks,

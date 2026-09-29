@@ -26,9 +26,10 @@ try {
   await page.goto(fixture.origin)
   await page.getByRole('heading', { name: '给想法留一盏灯' }).waitFor()
   check(
-    '独立主页面，无聊天输入框或浮窗',
+    '会话插页内完整工作区，无浮窗',
     (await page.locator('[data-dnc-workspace]').count()) === 1 &&
-      (await page.locator('.dnc-chip,.dnc-panel').count()) === 0,
+      (await page.locator('.dnc-chip,.dnc-panel').count()) === 0 &&
+      await page.getByRole('tab', { name: '笔记', exact: true }).isVisible(),
   )
   await page.screenshot({ path: path.join(out, 'notes-light.png') })
   await page.getByRole('searchbox', { name: '搜索笔记' }).fill('地铁')

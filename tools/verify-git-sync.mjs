@@ -136,7 +136,7 @@ const body = (rel, message) => ({ runGit: null, rel, message })
 {
   const r = recorder({
     push: { code: 1, stderr: '! [rejected] main -> main (non-fast-forward)' },
-    'pull --rebase': { code: 1, stderr: 'CONFLICT (content): Merge conflict' },
+    'pull --rebase --no-autostash': { code: 1, stderr: 'CONFLICT (content): Merge conflict' },
   })
   const note = await mod.syncAfterWrite({ ...body(REL, 'm'), runGit: r.runGit })
   ok('rebase 出冲突 → 停手报「需人工处理」，不再硬推', /需人工处理/.test(note), note)

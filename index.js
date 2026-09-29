@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.9.1)
+// dsh-note-changes · Host half (v1.10.0)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -19,6 +19,7 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { createVaultBrowser, notePath } from './lib/vault-browser.mjs'
 import { runShell } from './lib/shell-compat.mjs'
+import { vaultSyncState, transferVault } from './lib/vault-sync.mjs'
 
 export const name = 'dsh-note-changes'
 
@@ -46,6 +47,7 @@ const SETTINGS_REL = '00-索引/插件设置.md'
 
 /** 重试同步的路由（v1.8.0）：本地已有提交、只是当时 push 失败时，手动再推一次。 */
 const SYNC_PATH = '/note-changes/sync'
+const TRANSFER_PATH = '/note-changes/transfer'
 const LIBRARY_PATH = '/note-changes/library'
 const SAVE_PATH = '/note-changes/save'
 const CREATE_PATH = '/note-changes/create'
@@ -56,7 +58,7 @@ const VENDOR_PATH = '/note-changes/vendor'
  * 路由路径的单一真源。client 半各自硬编码了一份（两半独立打包，不能互相 import），
  * 漂移由 tools/verify-note-changes-routes.mjs 的「client 常量 == ROUTES」断言拦住。
  */
-export const ROUTES = { log: LOG_PATH, note: NOTE_PATH, settings: SETTINGS_PATH, sync: SYNC_PATH, library: LIBRARY_PATH, save: SAVE_PATH, create: CREATE_PATH, asset: ASSET_PATH, vendor: VENDOR_PATH }
+export const ROUTES = { log: LOG_PATH, note: NOTE_PATH, settings: SETTINGS_PATH, sync: SYNC_PATH, transfer: TRANSFER_PATH, library: LIBRARY_PATH, save: SAVE_PATH, create: CREATE_PATH, asset: ASSET_PATH, vendor: VENDOR_PATH }
 
 /** 设置默认值（设置文件不存在或缺键时用）。 */
 const DEFAULT_SETTINGS = {
@@ -463,8 +465,12 @@ export async function pushWithRebase(runGit) {
     if (push && push.code === 0) return { ok: true, message: '已提交并推送' }
 
     if (isPushRejected(gitDetail(push))) {
-      const pull = await runGit(['pull', '--rebase'], 60000, LANE_NETWORK)
+      const pull = await runGit(['pull', '--rebase', '--no-autostash'], 60000, LANE_NETWORK)
       if (!pull || pull.code !== 0) {
+        if (/CONFLICT|could not apply/i.test(gitDetail(pull))) {
+          const restored = await runGit(['rebase', '--abort'], 20000)
+          if (restored?.code === 0) return fail('已保留本机提交；与远端有冲突，需人工处理后再上传')
+        }
         return fail('已本地提交，但推送被拒且 rebase 失败，需人工处理：' + gitDetail(pull))
       }
       push = await runGit(['push'], 60000, LANE_NETWORK)
@@ -680,6 +686,7 @@ export async function apply(ctx) {
       }
 
       const rel = DAILY_DIR + '/' + today + '.md'
+      const syncNote = await withWriteLock('vault:' + vault, () => withWriteLock(vault + '/' + rel, async () => {
       const target = await fsService.resolve(vault + '/' + rel)
       const info = await fsService.stat(target)
       const before = info ? String(await fsService.readText(target) || '') : ''
@@ -693,7 +700,8 @@ export async function apply(ctx) {
       )
       stubState.stubDay[sessionId] = today
       // 兜底存根也走同一条同步：这条路径**不经过 agent**，不在这里提交就永远进不了抽屉、也上不了 GitHub。
-      const syncNote = await syncWrittenFile(vault, rel, buildSyncMessage('stub', today, ''))
+      return await syncWrittenFile(vault, rel, buildSyncMessage('stub', today, ''))
+      }))
       console.log('[dsh-note-changes] 已写兜底存根（' + decision.reason + '）' + syncNote)
     } catch (error) {
       console.error('[dsh-note-changes] 兜底写入失败：'
@@ -756,6 +764,35 @@ export async function apply(ctx) {
   }), 'dsh-note-changes: log route')
 
   const browser = createVaultBrowser(ctx.get('fs'))
+  ctx.effect(() => webServer.register({ kind: 'exact', path: TRANSFER_PATH, handler: async (req, res) => {
+    let transferVaultPath = ''
+    try {
+      const method = req.method || 'GET'
+      if (!['GET', 'POST'].includes(method)) throw new Error('只接受读取或同步操作')
+      if (method === 'POST' && (req.headers?.['x-dnc-editor'] !== '1' ||
+          !String(req.headers?.['content-type']).startsWith('application/json'))) throw new Error('请从笔记工作区发起同步')
+      const origin = req.headers?.origin
+      if (origin && new URL(origin).host !== req.headers.host) throw new Error('来源不匹配')
+      const seed = await resolveVault(queryParam(req.url, 'vault'), ctx.get('fs'))
+      const vault = seed.vault
+      const run = (args, timeout, lane) => runGitIn(vault, args, timeout, lane)
+      if (method === 'GET') {
+        const state = await withWriteLock('vault:' + vault, () => withWriteLock('git:' + vault, () => vaultSyncState(run, vault)))
+        sendJson(res, 200, { ok: true, vault, state, lastSync: syncFor(vault) })
+        return
+      }
+      const payload = JSON.parse(await readBody(req))
+      transferVaultPath = vault
+      const result = await withWriteLock('vault:' + vault, () => withWriteLock('git:' + vault, () => transferVault(run, vault, payload.direction)))
+      browser.invalidate()
+      lastSync = { at: new Date().toISOString(), vault, ok: true, note: result.message }
+      sendJson(res, 200, { ...result, vault, lastSync })
+    } catch (error) {
+      browser.invalidate()
+      if (transferVaultPath) lastSync = { at: new Date().toISOString(), vault: transferVaultPath, ok: false, note: error.message }
+      sendJson(res, 400, { ok: false, error: error.message })
+    }
+  }}), 'dsh-note-changes: transfer route')
   for (const [route, action] of [[NOTE_PATH, 'read'], [LIBRARY_PATH, 'list']]) {
     ctx.effect(() => webServer.register({ kind: 'exact', path: route, handler: async (req, res) => {
       try {
@@ -779,11 +816,11 @@ export async function apply(ctx) {
       const seed = await resolveVault(queryParam(req.url, 'vault'), ctx.get('fs'))
       const rel = notePath(payload.path)
       // The same lock key is shared with the diary append route.
-      const result = await withWriteLock(seed.vault + '/' + rel, async () => {
+      const result = await withWriteLock('vault:' + seed.vault, () => withWriteLock(seed.vault + '/' + rel, async () => {
         const saved = await browser[action](seed.vault, rel, payload.text, payload.revision)
         const sync = saved.changed ? await syncWrittenFile(seed.vault, rel, action === 'create' ? '新建笔记' : '编辑笔记') : ''
         return { ...saved, sync, lastSync: saved.changed ? lastSync : null }
-      })
+      }))
       sendJson(res, 200, { ok: true, ...result })
     } catch (error) {
       const conflict = error.code === 'CONFLICT' || error.code === 'FS_STALE_VERSION'
@@ -875,7 +912,7 @@ export async function apply(ctx) {
         // after 必须在锁外声明：下面的回执要用它。写在锁里 ⇒ 回执拿到的是 ReferenceError，
         // 于是"盘上写成功了、回执却报失败"（v1.6.2 的实测缺陷，路由级夹具抓到）。
         let after = ''
-        await withWriteLock(settingsKey, async function () {
+        await withWriteLock('vault:' + vault, () => withWriteLock(settingsKey, async function () {
           const info = await fsService.stat(target)
           const before = info ? String(await fsService.readText(target) || '') : ''
           after = patchFrontmatter(before, patch)
@@ -887,7 +924,7 @@ export async function apply(ctx) {
             mode: 'workspace-write',
             workspaceRoot: vault,
           })
-        })
+        }))
 
         sendJson(res, 200, {
           ok: true,
@@ -922,7 +959,7 @@ export async function apply(ctx) {
           sendJson(res, 200, { ok: false, error: '解析不出 vault 路径' })
           return
         }
-        const pushed = await withWriteLock('git:' + vault, () => pushWithRebase((args, timeoutMs, lane) => runGitIn(vault, args, timeoutMs, lane)))
+        const pushed = await withWriteLock('vault:' + vault, () => withWriteLock('git:' + vault, () => pushWithRebase((args, timeoutMs, lane) => runGitIn(vault, args, timeoutMs, lane))))
         // pushWithRebase 的回执是给"写完即同步"用的，那句「已提交并推送」在这条路上不成立
         // —— 这里一个提交都没建。同一句复述搬到重试路上会让人以为又产生了一条新提交。
         const message = pushed.message.replace(/已提交并推送/g, '已推送到远端').replace(/已本地提交，但/g, '')
@@ -1004,6 +1041,7 @@ export async function apply(ctx) {
       }
 
       try {
+        return await withWriteLock('vault:' + vault, async () => {
         const now = new Date()
         const date = localDate(now)
         const rel = DAILY_DIR + '/' + date + '.md'
@@ -1057,6 +1095,7 @@ export async function apply(ctx) {
           + '（' + appended.before + ' → ' + appended.after + ' 字符）'
           + '（' + (appended.existed ? '追加到已有文件' : '新建了当日记录') + '）'
           + syncNote
+        })
       } catch (error) {
         const message = (error && error.message) ? error.message : String(error)
         return '没写：' + message
@@ -1118,5 +1157,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.9.1)')
+  console.log('[dsh-note-changes] host up (v1.10.0)')
 }

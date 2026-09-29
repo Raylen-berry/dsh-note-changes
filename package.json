@@ -1,7 +1,7 @@
 {
   "name": "dsh-note-changes",
-  "version": "1.9.1",
-  "description": "DSH 独立 Obsidian 笔记工作区：目录、全文搜索、双链、Markdown 编辑、版本冲突保护和改动历史。保存后只提交当前文件，原有日记追加与自动同步继续可用。",
+  "version": "1.10.0",
+  "description": "DSH 会话中的 Obsidian 风格笔记插页：目录、搜索、双链、Markdown 编辑与 GitHub 双电脑同步。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -22,7 +22,7 @@
     "test": "node tools/run-all.mjs",
     "build": "node tools/build-client.mjs",
     "check": "node --check index.js && node --check client.js && node tools/build-client.mjs --check",
-    "test:browser": "node tools/browser-check.mjs"
+    "test:browser": "node tools/browser-check.mjs && node tools/browser-plus-check.mjs && node tools/browser-settings-check.mjs"
   },
   "files": [
     "index.js",

@@ -115,7 +115,7 @@ const resetGit = () => { calls.git.length = 0; gitQueue = [] }
 
 console.log('— 0. 四条路由都注册上了，且注册顺序/路径与导出的 ROUTES 一致 —')
 for (const [key, p] of Object.entries(ROUTES)) ok('ROUTES.' + key + ' = ' + p + ' 已注册', typeof routes[p] === 'function')
-ok('九条工作区路由全部注册', Object.keys(ROUTES).length === 9, String(Object.keys(ROUTES).length))
+ok('十条工作区路由全部注册', Object.keys(ROUTES).length === 10, String(Object.keys(ROUTES).length))
 if (Object.keys(routes).length === 0) { console.log('\n结果：' + pass + ' / ' + (fail + 1)); process.exit(1) }
 
 console.log('\n— 1. log：编码过的 ?vault= 解码正确 —')
@@ -240,7 +240,7 @@ gitQueue = [
   gitResult(0, '', ''),
 ]
 r = await call('/note-changes/sync', '/note-changes/sync?vault=E%3A%2Fvault', 'POST')
-ok('命令序列 push / pull --rebase / push', JSON.stringify(gitCommands()) === '["push","pull --rebase","push"]', JSON.stringify(gitCommands()))
+ok('命令序列 push / pull --rebase / push', JSON.stringify(gitCommands()) === '["push","pull --rebase --no-autostash","push"]', JSON.stringify(gitCommands()))
 ok('三条都在 network 泳道',
   calls.git.every((c) => c.sandbox && c.sandbox.mode === 'danger-full-access'),
   JSON.stringify(calls.git.map((c) => c.sandbox && c.sandbox.mode)))
@@ -250,7 +250,7 @@ gitQueue = [gitResult(1, '', '! [rejected] (non-fast-forward)'), gitResult(1, ''
 r = await call('/note-changes/sync', '/note-changes/sync?vault=E%3A%2Fvault', 'POST')
 ok('rebase 失败 → ok:false', r.body && r.body.ok === false)
 ok('明说需人工处理', r.body && /需人工处理/.test(r.body.message), String(r.body && r.body.message))
-ok('没再重推第三次', JSON.stringify(gitCommands()) === '["push","pull --rebase"]', JSON.stringify(gitCommands()))
+ok('冲突后恢复本机提交，不再重推', JSON.stringify(gitCommands()) === '["push","pull --rebase --no-autostash","rebase --abort"]', JSON.stringify(gitCommands()))
 ok('lastSync.ok 跟失败一致', r.body && r.body.lastSync && r.body.lastSync.ok === false)
 ok('lastSync.note 是"（"开头的失败句式', r.body && r.body.lastSync && r.body.lastSync.note.charAt(0) === '（',
   String(r.body && r.body.lastSync && r.body.lastSync.note))
@@ -289,7 +289,7 @@ ok('LOG_PATH 对齐 ROUTES.log', internals.LOG_PATH === ROUTES.log, String(inter
 ok('NOTE_PATH 对齐 ROUTES.note', internals.NOTE_PATH === ROUTES.note, String(internals.NOTE_PATH))
 ok('SETTINGS_PATH 对齐 ROUTES.settings', internals.SETTINGS_PATH === ROUTES.settings, String(internals.SETTINGS_PATH))
 ok('SYNC_PATH 对齐 ROUTES.sync', internals.SYNC_PATH === ROUTES.sync, String(internals.SYNC_PATH))
-ok('client 用 POST 打 sync', /api\(url\(SYNC_PATH,\s*vault\),\s*\{\s*method:\s*'POST'/.test(clientText))
+ok('client 用 POST 明确区分上传下载', /api\(url\(TRANSFER_PATH,\s*vault\),\s*\{\s*method:\s*'POST'/.test(clientText))
 // 外部协议链接在这个 GUI 里永远点不动（桌面版 secureWindow 只放行 http/https），
 // 所以钉住"别再把 obsidian:// 之类的死链接塞回来"；真要跳转得 Host 半去 shell.openExternal。
 ok('client 里没有点不动的外部协议链接', !/href:\s*['"]?(obsidian|vscode|file):/i.test(clientText))
