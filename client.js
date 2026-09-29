@@ -584,7 +584,9 @@ function apply(ctx) {
       }
     }
     async function save() {
-      if (saving || !note || !dirty) return
+      if (saving || !note || note.path !== selected || !dirty) return
+      const normalizedVault = (value) => String(value).replace(/\\/g, '/').replace(/\/+$/, '')
+      if (vault && normalizedVault(vault) !== normalizedVault(note.vault)) return
       var text = draft,
         revision = baseRevision,
         path = selected,
