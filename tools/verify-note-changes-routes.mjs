@@ -136,14 +136,14 @@ ok('subject 取缩进行', c0.subject === '日记 2026-09-23 要点：瘦身', S
 ok('files 只留 .md', JSON.stringify(c0.files) === JSON.stringify(['00-收件箱/日记/2026-09-23.md', '99-模板/日记模板.md']),
   JSON.stringify(c0.files))
 
-console.log('\n— 3. 非法 % 转义：不 500，且这一档被当无效、退回下一档 —')
+console.log('\n— 3. 非法 % 转义：报告错误路径，不悄悄连接另一个库 —')
 process.env.DNC_VAULT = 'D:/nc-test-vault'
 resetGit()
 r = await call('/note-changes/log', '/note-changes/log?vault=E%3A%2Fva%ZZult')
-ok('没炸成 500', r.status === 200, 'status=' + String(r.status))
+ok('明确返回无效路径 400', r.status === 400, 'status=' + String(r.status))
 ok('坏转义没进命令', !calls.git.some((c) => c.command.includes('%ZZ')))
-ok('退回 env 那一档', calls.git[0] && calls.git[0].command.includes('-C "D:/nc-test-vault"'), gitCommands()[0])
-ok('vaultSource 是 env', r.body && r.body.vaultSource === 'env', String(r.body && r.body.vaultSource))
+ok('没有对错误库执行命令', calls.git.length === 0)
+ok('回执要求有效绝对路径', r.body && r.body.ok === false && /绝对路径/.test(r.body.error), String(r.body && r.body.error))
 delete process.env.DNC_VAULT
 
 console.log('\n— 4. note：path 解码 + 只读 vault 内 .md —')

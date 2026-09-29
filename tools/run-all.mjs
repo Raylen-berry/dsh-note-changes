@@ -25,6 +25,7 @@ const SUITES = [
   'tools/verify-note-changes-routes.mjs',
   'tools/verify-workspace.mjs',
   'tools/verify-workspace-plus.mjs',
+  'tools/verify-shell-compat.mjs',
   'tools/verify-git-file-scope.mjs',
 ]
 

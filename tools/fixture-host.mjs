@@ -14,7 +14,7 @@ async function canonical(p) {
     return path.join(await canonical(parent), path.basename(p))
   }
 }
-export async function fixture() {
+export async function fixture(options = {}) {
   const vault = await fs.mkdtemp(path.join(os.tmpdir(), 'dnc-workspace-')),
     routes = {},
     commands = []
@@ -84,21 +84,28 @@ export async function fixture() {
           },
         }
       if (name === 'shell')
-        return {
-          resolve: (s) => s,
-          run: async (s) => {
-            commands.push(s.command)
-            return {
-              exitCode: 0,
-              stdout: {
-                text: s.command.includes(' log ')
-                  ? 'commit 0123456789012345678901234567890123456789\nAuthor: Local\nDate:   2026-09-29\n\n    整理了今天的灵感\n\n想法/灵感花园.md\n日记/今天.md\n'
-                  : 'true',
-              },
-              stderr: { text: '' },
-            }
-          },
-        }
+        return (
+          options.shell || {
+            resolve: (s) => s,
+            execute: async (s) => {
+              commands.push(s.command)
+              return {
+                result: async () =>
+                  options.shellResult
+                    ? options.shellResult(s)
+                    : {
+                        exitCode: 0,
+                        stdout: {
+                          text: s.command.includes(' log ')
+                            ? 'commit 0123456789012345678901234567890123456789\nAuthor: Local\nDate:   2026-09-29\n\n    整理了今天的灵感\n\n想法/灵感花园.md\n日记/今天.md\n'
+                            : 'true',
+                        },
+                        stderr: { text: '' },
+                      },
+              }
+            },
+          }
+        )
     },
     effect(fn) {
       return fn()

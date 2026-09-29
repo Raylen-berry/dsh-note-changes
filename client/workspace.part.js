@@ -44,7 +44,7 @@ async function api(route, options) {
     throw new Error('页面接口暂不可用，请重启 Desktop 后重试')
   }
   if (!body.ok) {
-    var error = new Error(body.error || '请求失败')
+    var error = new Error(body.error || body.message || body.lastSync?.note || '请求失败')
     error.conflict = body.conflict
     throw error
   }
@@ -52,22 +52,23 @@ async function api(route, options) {
 }
 function useResource(route, vault, params, revision, enabled) {
   var [state, setState] = React.useState({ loading: false, data: null, error: '' }),
-    query = JSON.stringify(params || {})
+    query = JSON.stringify(params || {}),
+    request = JSON.stringify([route, vault, query, revision, enabled])
   React.useEffect(
     function () {
       if (enabled === false) {
-        setState({ loading: false, data: null, error: '' })
+        setState({ request, loading: false, data: null, error: '' })
         return
       }
       var controller = new AbortController(),
         alive = true
-      setState({ loading: true, data: null, error: '' })
+      setState({ request, loading: true, data: null, error: '' })
       api(url(route, vault, JSON.parse(query)), { signal: controller.signal })
         .then((data) => {
-          if (alive) setState({ loading: false, data, error: '' })
+          if (alive) setState({ request, loading: false, data, error: '' })
         })
         .catch((e) => {
-          if (alive) setState({ loading: false, data: null, error: e.message })
+          if (alive) setState({ request, loading: false, data: null, error: e.message })
         })
       return () => {
         alive = false
@@ -76,7 +77,7 @@ function useResource(route, vault, params, revision, enabled) {
     },
     [route, vault, query, revision, enabled],
   )
-  return state
+  return state.request === request ? state : { loading: enabled !== false, data: null, error: '' }
 }
 function ErrorBox(props) {
   return props.text ? h('div', { className: 'dnc-error', role: 'alert' }, props.text) : null
@@ -128,15 +129,21 @@ function apply(ctx) {
   style.textContent = CSS
   document.head.appendChild(style)
   if (ctx.effect) ctx.effect(() => () => style.remove(), 'dsh-note-changes: styles')
-  var override = stored(window.localStorage, 'dsh-note-changes:vault', ''),
+  var override = {
+      path: stored(window.localStorage, 'dsh-note-changes:vault', ''),
+      revision: 0,
+      resolved: '',
+    },
     listeners = new Set()
-  function setVault(v) {
-    override = v
+  function setVault(v, resolved) {
     try {
       if (v) window.localStorage.setItem('dsh-note-changes:vault', v)
       else window.localStorage.removeItem('dsh-note-changes:vault')
-    } catch (_) {}
-    listeners.forEach((f) => f(v))
+    } catch (_) {
+      throw new Error('无法保存本机连接配置，请检查 Desktop 存储权限')
+    }
+    override = { path: v, revision: override.revision + 1, resolved }
+    listeners.forEach((f) => f(override))
   }
   function useVault() {
     var pair = React.useState(override)
@@ -147,17 +154,44 @@ function apply(ctx) {
     return pair[0]
   }
 
-  function Settings({ vault, onRefresh }) {
+  function Settings({ vault, connectionRevision = 0 }) {
     var [revision, setRevision] = React.useState(0),
-      state = useResource(SETTINGS_PATH, vault, {}, revision),
+      state = useResource(SETTINGS_PATH, vault, {}, revision + connectionRevision),
       [draft, setDraft] = React.useState(vault),
       [busy, setBusy] = React.useState(false),
       [message, setMessage] = React.useState(''),
+      [connectionMessage, setConnectionMessage] = React.useState(''),
       [error, setError] = React.useState('')
     React.useEffect(() => setDraft(vault), [vault])
     var settings = state.data?.settings || {}
+    async function connect(value, follow) {
+      var next = value.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+      setBusy(follow ? 'follow' : 'connect')
+      setError('')
+      setConnectionMessage('正在检查笔记库…')
+      try {
+        if (next && !/^(?:[a-z]:\/|\/)/i.test(next))
+          throw new Error('请输入完整路径，例如 D:/DeepSeek/vault')
+        var result = await api(url(LIBRARY_PATH, next, { refresh: '1' }))
+        setVault(next, result.vault)
+        setDraft(next)
+        setMessage('')
+        setConnectionMessage(
+          (follow || !next ? '已跟随本机配置：' : '已连接：') +
+            result.vault +
+            ' · ' +
+            result.total +
+            ' 篇笔记',
+        )
+      } catch (e) {
+        setConnectionMessage('')
+        setError('连接未更改：' + e.message)
+      } finally {
+        setBusy(false)
+      }
+    }
     async function update(patch) {
-      setBusy(true)
+      setBusy('settings')
       setError('')
       try {
         await api(url(SETTINGS_PATH, vault), {
@@ -167,7 +201,6 @@ function apply(ctx) {
         })
         setRevision((n) => n + 1)
         setMessage('设置已保存')
-        onRefresh?.()
       } catch (e) {
         setError(e.message)
       } finally {
@@ -175,15 +208,17 @@ function apply(ctx) {
       }
     }
     async function sync() {
-      setBusy(true)
+      setBusy('sync')
       setError('')
+      setMessage('正在推送已有提交…')
       try {
         var result = await api(url(SYNC_PATH, vault), { method: 'POST' })
         setMessage(result.message || '已同步')
-        setRevision((n) => n + 1)
       } catch (e) {
         setError(e.message)
+        setMessage('推送未完成；本地笔记仍保留。')
       } finally {
+        setRevision((n) => n + 1)
         setBusy(false)
       }
     }
@@ -196,7 +231,7 @@ function apply(ctx) {
         { className: 'dnc-notice' },
         '连接你的本地 Obsidian 笔记库，浏览和编辑普通 Markdown 文件。',
       ),
-      h(ErrorBox, { text: state.error || error }),
+      h(ErrorBox, { text: error || state.error }),
       h(
         'section',
         { className: 'dnc-setting' },
@@ -206,25 +241,30 @@ function apply(ctx) {
           id: 'dnc-vault',
           type: 'text',
           value: draft,
+          disabled: !!busy,
           onChange: (e) => setDraft(e.target.value),
           placeholder: state.data?.vaultPath || '留空，跟随本机配置',
         }),
         h('p', null, '当前：' + (state.data?.vaultPath || vault || '等待连接')),
         h(
+          'p',
+          { className: 'dnc-notice' },
+          '连接笔记库会检查并记住当前窗口使用的路径；跟随本机配置会重新读取 Desktop 的本机路径设置。',
+        ),
+        h(
           Button,
-          { className: 'dnc-primary', onClick: () => setVault(draft.trim()) },
-          '连接笔记库',
+          { className: 'dnc-primary', disabled: !!busy, onClick: () => connect(draft, false) },
+          busy === 'connect' ? '正在连接…' : '连接笔记库',
         ),
         h(
           Button,
           {
-            onClick: () => {
-              setVault('')
-              setDraft('')
-            },
+            disabled: !!busy,
+            onClick: () => connect('', true),
           },
-          '跟随本机配置',
+          busy === 'follow' ? '正在读取配置…' : '跟随本机配置',
         ),
+        h('p', { role: 'status', 'data-dnc-connection-status': true }, connectionMessage),
       ),
       h(
         'section',
@@ -253,7 +293,11 @@ function apply(ctx) {
           '会话结束时记录要点',
         ),
         h('p', null, '手动保存会保留全文与双链，并只提交当前文件。同步失败时，本地内容仍然保留。'),
-        h(Button, { disabled: busy, onClick: sync }, busy ? '正在处理…' : '重试推送'),
+        h(
+          Button,
+          { disabled: !!busy || !state.data, onClick: sync },
+          busy === 'sync' ? '正在推送…' : '重试推送',
+        ),
         h('p', { role: 'status' }, message || state.data?.lastSync?.note || '还没有同步回执'),
       ),
     )
@@ -295,7 +339,8 @@ function apply(ctx) {
     )
   }
   function Workspace() {
-    var vault = useVault(),
+    var connection = useVault(),
+      vault = connection.path,
       [tab, setTab] = React.useState('notes'),
       [refresh, setRefresh] = React.useState(0),
       [noteRefresh, setNoteRefresh] = React.useState(0)
@@ -321,9 +366,26 @@ function apply(ctx) {
       [propertyValue, setPropertyValue] = React.useState(''),
       [shelf, setShelf] = React.useState('all'),
       draftFailed = React.useRef(false)
-    var library = useResource(LIBRARY_PATH, vault, { refresh: refresh ? '1' : '0' }, refresh),
-      results = useResource(LIBRARY_PATH, vault, { q: search }, refresh, !!search),
-      documentState = useResource(NOTE_PATH, vault, { path: selected }, noteRefresh, !!selected)
+    var library = useResource(
+        LIBRARY_PATH,
+        vault,
+        { refresh: refresh || connection.revision ? '1' : '0' },
+        refresh + connection.revision,
+      ),
+      results = useResource(
+        LIBRARY_PATH,
+        vault,
+        { q: search },
+        refresh + connection.revision,
+        !!search,
+      ),
+      documentState = useResource(
+        NOTE_PATH,
+        vault,
+        { path: selected },
+        noteRefresh + connection.revision,
+        !!selected,
+      )
     var notes = library.data?.notes || [],
       note = documentState.data,
       dirty = draft !== base
@@ -362,6 +424,7 @@ function apply(ctx) {
     }, [query])
     React.useEffect(() => {
       setSelected('')
+      setEditing(false)
       setQuery('')
       setError('')
       setChoices([])
@@ -375,7 +438,7 @@ function apply(ctx) {
       setPropertyValue('')
       setShelf('all')
       setGraphVisible(false)
-    }, [vault])
+    }, [vault, connection.resolved])
     React.useEffect(() => {
       if (library.data && !selected) {
         var last = stored(window.localStorage, 'dnc:last:' + actualVault, '')
@@ -592,7 +655,7 @@ function apply(ctx) {
         h(Button, { title: '刷新目录和搜索索引', onClick: () => setRefresh((n) => n + 1) }, '刷新'),
       ),
       tab === 'settings'
-        ? h(Settings, { vault, onRefresh: () => setRefresh((n) => n + 1) })
+        ? h(Settings, { vault, connectionRevision: connection.revision })
         : tab === 'history'
           ? h(History, { vault, revision: refresh, onOpen: open })
           : h(
@@ -1002,12 +1065,16 @@ function apply(ctx) {
     slots.register(
       { name: 'settings.section', id: 'note-changes', order: 65, label: '笔记库' },
       function () {
-        var vault = useVault()
-        return h('div', { className: 'dnc-workspace' }, h(Settings, { vault }))
+        var connection = useVault()
+        return h(
+          'div',
+          { className: 'dnc-workspace' },
+          h(Settings, { vault: connection.path, connectionRevision: connection.revision }),
+        )
       },
     ),
   )
-  console.log('[dsh-note-changes] client up (v1.9.0)')
+  console.log('[dsh-note-changes] client up (v1.9.1)')
 }
 exports.name = 'dsh-note-changes'
 exports.inject = ['slots']

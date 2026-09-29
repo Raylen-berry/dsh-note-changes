@@ -1,4 +1,4 @@
-# DSH 笔记库 · v1.9.0
+# DSH 笔记库 · v1.9.1
 
 在 DSH Desktop 侧栏打开 **笔记库**，进入独立的 Obsidian 笔记工作区。正文占据主页面，不再挂在聊天输入框上，也不遮住聊天内容。
 
@@ -29,6 +29,10 @@
 
 路径优先级保持不变：显式参数 / 设置页覆盖 → `DNC_VAULT` → `$DSH_HOME/dsh-note-changes/vault.txt` → 笔记库设置 → 默认值。换机器可在指针文件写一行本地绝对路径。插件不修改 `.obsidian/`。
 
+“连接笔记库”先检查目录可读，再保存本机路径并刷新目录、搜索和正文；“跟随本机配置”清除页面覆盖路径，重新读取本机引导。重复点击同一路径也会检查并显示成功回执。无效或不可读路径会说明原因并保留原连接。
+
+v1.9.1 兼容新版 Desktop 的 `shell.execute(...).result()` 与旧版 `shell.run(...)`。改动历史、手动保存后的提交推送、自动日记与重试推送共用适配器。推送失败保留具体原因，回执按笔记库区分；“重试推送”只推送已有提交，不代替手动保存或提交其他改动。
+
 ## 开发与检查
 
 ```sh
@@ -37,6 +41,7 @@ npm run check
 npm test
 node tools/browser-check.mjs
 node tools/browser-plus-check.mjs
+node tools/browser-settings-check.mjs
 ```
 
 - `client/workspace.part.js`：页面与状态；`client/markdown.part.js`：Markdown 阅读与链接解析；`client/plus.part.js`：创建、合并、关系图与附件组件；`client/styles.css`：主题和窄屏样式。

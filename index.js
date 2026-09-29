@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.9.0)
+// dsh-note-changes · Host half (v1.9.1)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -18,6 +18,7 @@
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { createVaultBrowser, notePath } from './lib/vault-browser.mjs'
+import { runShell } from './lib/shell-compat.mjs'
 
 export const name = 'dsh-note-changes'
 
@@ -559,6 +560,11 @@ export async function apply(ctx) {
    * 表过态，不能再被 git 同步过来的上一台机器的路径盖回去。
    */
   async function resolveVault(explicit, fsService) {
+    if (String(explicit || '').trim() && !normalizeVaultPath(explicit)) {
+      const error = new Error('请输入笔记库的完整绝对路径')
+      error.code = 'INVALID_VAULT'
+      throw error
+    }
     let picked = pickVaultSeed({
       explicit,
       env: process.env[ENV_VAULT_KEY],
@@ -615,14 +621,13 @@ export async function apply(ctx) {
     if (/["`$%\r\n]/.test(vault)) return { code: 1, stderr: '笔记库路径含特殊字符，无法安全调用 git' }
     const shell = ctx.get('shell')
     if (shell === undefined) throw new Error('Host 未提供 shell 服务')
-    const spec = shell.resolve({
+    const result = await runShell(shell, {
       command: 'git -c core.quotepath=false -C "' + vault + '" ' + args.join(' '),
       workdir: vault,
       timeoutMs,
       stdoutMaxBytes: 200000,
       sandboxPolicy: vaultSandboxPolicy(vault, lane),
     })
-    const result = await shell.run(spec)
     return {
       code: result ? result.exitCode : null,
       stdout: result && result.stdout ? String(result.stdout.text || '') : '',
@@ -635,6 +640,7 @@ export async function apply(ctx) {
    * 而回执随着对话滚走了 —— 设置页留一行，失败这件事在关掉抽屉之后还看得见、还能重试。
    */
   let lastSync = null
+  const syncFor = vault => lastSync?.vault === vault ? lastSync : null
 
   /** 写完一个文件后立刻提交推送；附注（成功或失败原因）交给调用方回报，永不抛。 */
   async function syncWrittenFile(vault, rel, message) {
@@ -744,7 +750,7 @@ export async function apply(ctx) {
         }
         sendJson(res, 200, { ok: true, vault, vaultSource: seed.source, commits: parseLog(result.stdout) })
       } catch (err) {
-        sendJson(res, 500, { ok: false, error: String((err && err.message) || err) })
+        sendJson(res, err.code === 'INVALID_VAULT' ? 400 : 500, { ok: false, error: String((err && err.message) || err) })
       }
     },
   }), 'dsh-note-changes: log route')
@@ -830,7 +836,7 @@ export async function apply(ctx) {
         if (String(req.method || 'GET').toUpperCase() !== 'POST') {
           const info = await fsService.stat(target)
           if (!info) {
-            sendJson(res, 200, { ok: true, exists: false, source: SETTINGS_REL, vaultSource: seed.source, vaultPath: vault, settings: DEFAULT_SETTINGS, lastSync })
+            sendJson(res, 200, { ok: true, exists: false, source: SETTINGS_REL, vaultSource: seed.source, vaultPath: vault, settings: DEFAULT_SETTINGS, lastSync: syncFor(vault) })
             return
           }
           const text = String(await fsService.readText(target) || '')
@@ -841,7 +847,7 @@ export async function apply(ctx) {
             vaultSource: seed.source,
             vaultPath: vault,
             settings: resolveSettings(parseFrontmatter(text)),
-            lastSync,
+            lastSync: syncFor(vault),
           })
           return
         }
@@ -890,7 +896,7 @@ export async function apply(ctx) {
           vaultPath: vault,
           wrote: Object.keys(patch),
           settings: resolveSettings(parseFrontmatter(after)),
-          lastSync,
+          lastSync: syncFor(vault),
         })
       } catch (err) {
         sendJson(res, 200, { ok: false, error: String((err && err.message) || err) })
@@ -916,12 +922,10 @@ export async function apply(ctx) {
           sendJson(res, 200, { ok: false, error: '解析不出 vault 路径' })
           return
         }
-        const pushed = await pushWithRebase((args, timeoutMs, lane) => runGitIn(vault, args, timeoutMs, lane))
+        const pushed = await withWriteLock('git:' + vault, () => pushWithRebase((args, timeoutMs, lane) => runGitIn(vault, args, timeoutMs, lane)))
         // pushWithRebase 的回执是给"写完即同步"用的，那句「已提交并推送」在这条路上不成立
         // —— 这里一个提交都没建。同一句复述搬到重试路上会让人以为又产生了一条新提交。
-        const message = pushed.ok
-          ? pushed.message.replace('已提交并推送', '已推送到远端')
-          : pushed.message
+        const message = pushed.message.replace(/已提交并推送/g, '已推送到远端').replace(/已本地提交，但/g, '')
         // 与 syncWrittenFile 写同一个字段、同一套'，'/'（…）'约定，前端只有一条显示分支。
         lastSync = {
           at: new Date().toISOString(),
@@ -935,6 +939,7 @@ export async function apply(ctx) {
           vault,
           vaultSource: seed.source,
           message,
+          ...(!pushed.ok ? { error: message } : {}),
           lastSync,
         })
       } catch (err) {
@@ -1113,5 +1118,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.9.0)')
+  console.log('[dsh-note-changes] host up (v1.9.1)')
 }
