@@ -65,6 +65,24 @@ const DEFAULT_SETTINGS = {
   vault: DEFAULT_VAULT,
   scanVault: true,
   autoWriteOnSessionEnd: true,
+  // 逃生阀（默认 false）：把 write 腿也放成 danger-full-access。
+  // 只给"宿主托管子进程坏了"的机器开（见 vaultSandboxPolicy 里的实测记录）。
+  fullAccess: false,
+}
+
+/**
+ * write 腿是否跳过沙箱托管执行。两个来源：环境变量 DNC_FULL_ACCESS=1、
+ * 或 vault 设置文件的 `fullAccess: true`（后者要先把设置读出来，见 refreshFullAccess）。
+ * 读设置是异步的，所以这里同步读一个**缓存**；缓存由 readSettingsFor 的调用方刷新。
+ */
+let fullAccessFromSettings = false
+function fullAccessEnabled() {
+  const env = String(process.env.DNC_FULL_ACCESS || '').trim().toLowerCase()
+  if (env === '1' || env === 'true' || env === 'yes') return true
+  return fullAccessFromSettings === true
+}
+function rememberFullAccess(settings) {
+  fullAccessFromSettings = !!(settings && settings.fullAccess === true)
 }
 
 // ---- 机器本地引导（v1.5.0）-------------------------------------------------
@@ -163,7 +181,7 @@ export function parseFrontmatter(text) {
 
 /** 把 frontmatter 里的字符串值转成设置类型。 */
 function coerceSetting(key, raw) {
-  if (key === 'scanVault' || key === 'autoWriteOnSessionEnd') {
+  if (key === 'scanVault' || key === 'autoWriteOnSessionEnd' || key === 'fullAccess') {
     return raw === true || raw === 'true' || raw === '1' || raw === 'yes'
   }
   return String(raw == null ? '' : raw)
@@ -182,6 +200,7 @@ export function resolveSettings(parsed) {
     autoWriteOnSessionEnd: has('autoWriteOnSessionEnd')
       ? coerceSetting('autoWriteOnSessionEnd', src.autoWriteOnSessionEnd)
       : DEFAULT_SETTINGS.autoWriteOnSessionEnd,
+    fullAccess: has('fullAccess') ? coerceSetting('fullAccess', src.fullAccess) : DEFAULT_SETTINGS.fullAccess,
   }
 }
 
@@ -537,7 +556,10 @@ export async function apply(ctx) {
       const info = await fsService.stat(target)
       if (!info) return null
       const text = String(await fsService.readText(target) || '')
-      return resolveSettings(parseFrontmatter(text))
+      const settings = resolveSettings(parseFrontmatter(text))
+      // 顺手刷新"逃生阀"缓存（同步读不了设置文件，但每次真读到就更新一次）
+      rememberFullAccess(settings)
+      return settings
     } catch (error) {
       return null
     }
@@ -613,6 +635,15 @@ export async function apply(ctx) {
    */
   function vaultSandboxPolicy(vault, lane) {
     if (lane === 'network') return { mode: 'danger-full-access' }
+    // v1.10.2（2026-10-01）逃生阀：某些宿主的**托管子进程**是坏的 ——
+    // Desktop 0.2.0-rc.2 的 `dsh-subprocess-local` 只解包了 lib/、没有 runner.js，
+    // 于是 workspace-write 这条腿（要走 Windows Job runner 包一层）必然失败：
+    //   Workspace Write lane → spawn <app>/resources/app.asar.unpacked/.../runner → ENOENT
+    //   Write lane → git 退出码 0xC0000142（STATUS_DLL_INIT_FAILED）
+    // 实测：把 write 腿也放成 danger-full-access（跳过托管执行）立刻恢复正常。
+    // 默认**关**：其它机器上 workspace-write 是更严的那档，别替用户放宽。
+    // 打开方式：环境变量 DNC_FULL_ACCESS=1，或 vault 设置文件的 fullAccess: true。
+    if (fullAccessEnabled()) return { mode: 'danger-full-access' }
     let root = vault
     try { root = realpathSync.native(vault) } catch { /* vault 不存在就照原样用，让 git 自己报错 */ }
     return { mode: 'workspace-write', workspaceRoot: root }
