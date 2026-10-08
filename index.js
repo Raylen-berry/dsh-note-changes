@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.11.0)
+// dsh-note-changes · Host half (v1.12.0)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -455,13 +455,38 @@ export function buildSyncMessage(purpose, date, title) {
   return '日记 ' + String(date) + ' ' + kind + (extra.length > 0 ? '：' + extra : '')
 }
 
-// ---- 提示词资产（v1.11.0）--------------------------------------------------
-// 目录与字段口径的真源是 vault 里的 `40-提示词/提示词资产库说明.md`：改这里要同步改那篇，
+// ---- 创作要求与偏好库（v1.12.0）--------------------------------------------
+// 目录与字段口径的真源是 vault 里的 `40-提示词/创作要求与偏好库.md`：改这里要同步改那篇，
 // 否则 agent 按说明填的字段会与代码写出的 frontmatter 对不上。
+// 定位：**不是固定话术仓库** —— 主体是「要什么、什么算达标、什么值得参考」，固定话术只是其中一类。
+// frontmatter 里 binding / scope / origin 三个控制位决定它**何时被引用、绑多紧**。
 const PROMPT_DIR = '40-提示词'
 
 /** 批次未成熟条目的占位标记（dsh-video-prompt/client.js:1654 那个字面量的开头）。 */
 const PLACEHOLDER_MARK = '（待填'
+
+// 下面三张词表是**唯一真源**：工具参数的 enum、vault 里那篇说明的表格、离线断言都从这里对齐。
+// 加取值只改这里 + 那篇说明，别在 parameters 里再写一份字面量（两份必然漂移）。
+/** 记录类型。库的主体是「要什么 / 什么算达标」，固定话术只是其中一类。 */
+export const ASSET_TYPES = ['要求', '偏好', '参考', '模板', '经验']
+/** 约束强度 —— 读到它的人该被绑多紧。默认取最松的「参考」。 */
+export const ASSET_BINDINGS = ['必须', '优先', '参考']
+/** 来源 —— 「AI推测」的条目不许当成用户的偏好引用（见那篇说明的引用规则）。 */
+export const ASSET_ORIGINS = ['用户明说', '参考案例', 'AI推测']
+/** scope 的缺省值：最窄那一档，避免一次任务的要求被永久套用到所有任务。 */
+export const DEFAULT_SCOPE = '任务'
+
+/**
+ * 「必须」只能配「用户明说」：模型自己推测出来的东西不许被记成必须满足的要求。
+ * 自报终究不是证明，但它把**沉默的越权**变成文件里看得见的一行 —— 比默认放行强。
+ * 返回 null（无冲突）或 { binding, origin }，纯函数，见 tools/verify-prompt-asset.mjs。
+ */
+export function bindingConflict(args) {
+  const a = args || {}
+  const binding = a.binding || ASSET_BINDINGS[ASSET_BINDINGS.length - 1]
+  const origin = a.origin || ASSET_ORIGINS[ASSET_ORIGINS.length - 1]
+  return binding === '必须' && origin !== '用户明说' ? { binding, origin } : null
+}
 
 /**
  * 资产名 → 文件名。剥掉 Windows 非法字符与路径分隔符（顺带堵住「标题里带 / 就造出子目录」），
@@ -520,19 +545,23 @@ function fenceFor(text) {
 }
 
 /**
- * 拼一个资产文件。四节固定（提示词原文 / 变量 / 适用条件 / 使用记录）——
- * 结构一致，两个资产才能直接对着看差异；后三节留空，由人或 agent 随后补。
- * 纯函数，好断言：见 tools/verify-prompt-asset.mjs。
+ * 拼一条记录。四节固定（内容 / 验收 / 适用与例外 / 使用记录）——
+ * 结构一致，两条记录才能直接对着看差异；后三节留空，由人或 agent 随后补。
+ * frontmatter 里 binding / scope / origin 是**控制位**：管的是这条何时被引用、绑多紧，
+ * 不是内容本身。纯函数，好断言：见 tools/verify-prompt-asset.mjs。
  */
-export function buildAssetFile(args, prompt, date) {
+export function buildAssetFile(args, content, date) {
   const a = args || {}
   const title = String(a.title == null ? '' : a.title).trim()
-  const tags = ['提示词'].concat(Array.isArray(a.tags) ? a.tags : [])
-  const fence = fenceFor(prompt)
+  const tags = ['创作要求'].concat(Array.isArray(a.tags) ? a.tags : [])
+  const fence = fenceFor(content)
   return [
     '---',
     yamlLine('title', title),
-    yamlLine('type', a.type || '模板'),
+    yamlLine('type', a.type || ASSET_TYPES[0]),
+    yamlLine('binding', a.binding || ASSET_BINDINGS[ASSET_BINDINGS.length - 1]),
+    yamlLine('scope', a.scope || DEFAULT_SCOPE),
+    yamlLine('origin', a.origin || ASSET_ORIGINS[ASSET_ORIGINS.length - 1]),
     yamlLine('task', a.task),
     yamlLine('model', a.model),
     yamlLine('engine', a.engine),
@@ -548,26 +577,25 @@ export function buildAssetFile(args, prompt, date) {
     '',
     '# ' + title,
     '',
-    '## 提示词原文',
+    '## 内容',
     '',
     fence + 'text',
-    prompt,
+    content,
     fence,
     '',
-    '## 变量',
+    '## 验收',
     '',
-    '| 变量 | 说明 | 示例 |',
-    '| --- | --- | --- |',
-    '|  |  |  |',
+    '- 达标（可核查的判据）：',
+    '- 不达标：',
     '',
-    '## 适用条件',
+    '## 适用与例外',
     '',
-    '- **能用**：',
-    '- **别用**：',
+    '- **适用**：',
+    '- **例外**：',
     '',
     '## 使用记录',
     '',
-    '| 日期 | 批次 / 产物 | 结果 | 评价 |',
+    '| 日期 | 任务 / 产物 | 是否满足 | 备注 |',
     '| --- | --- | --- | --- |',
     '|  |  |  |  |',
     '',
@@ -1305,36 +1333,41 @@ export async function apply(ctx) {
     },
   }), 'dsh-note-changes: vault_note_search tool')
 
-  // ---- 模型工具：把成熟的提示词收进资产库（v1.11.0）----
-  // 为什么需要它：资产要被笔记页的**属性筛选**找出来，frontmatter 就得逐字段合法。
-  // 让模型每次手写 YAML，漏一个字段就少一条筛选路，而且**不报错**（静默失败最难查）。
-  // 这里把字段收敛成参数、由代码拼 frontmatter，并复用既有三件：browser.create 的
-  // 原子 createIfAbsent、withWriteLock 的同路径排队、syncWrittenFile 的写完即 push
-  //（vault AGENTS.md §1 要求随写随提交，不提交就不会出现在另一台机器上）。
+  // ---- 模型工具：把创作要求 / 偏好 / 参考收进库（v1.12.0）----
+  // 定位不是「固定话术仓库」：主体是**要什么、什么算达标、什么值得参考**。所以每条记录都带
+  // 三个控制位 —— 约束强度 binding、适用范围 scope、来源 origin —— 管的是「何时被引用、
+  // 以多强的约束生效」。字段由代码拼 frontmatter：漏一个字段就少一条筛选路，而且**不报错**。
+  // 复用既有三件：browser.create 的原子 createIfAbsent、withWriteLock 的同路径排队、
+  // syncWrittenFile 的写完即 push（vault AGENTS.md §1 要求随写随提交）。
   ctx.effect(() => ctx.tools.register({
     name: 'prompt_asset_save',
-    description: '把一段**已经写完**的提示词收进 vault 的提示词资产库（' + PROMPT_DIR + '/<标题>.md）。'
+    description: '把一条**创作要求 / 长期偏好 / 参考案例 / 可复用话术**收进 vault 的 ' + PROMPT_DIR + '。'
       + '按固定 frontmatter 写入并当场提交推送。'
-      + '只收成熟提示词：批次里还是「（待填…」的占位条目不算，先让它产出真提示词。'
-      + '同名已存在时拒绝覆盖——资产优先新建（vault AGENTS.md §2）。'
-      + '收录字段的取值见 vault 里 ' + PROMPT_DIR + '/提示词资产库说明.md。',
+      + '两个控制位要写心思：binding（必须/优先/参考，默认「参考」）决定它该被绑多紧，'
+      + 'scope（默认「任务」，最窄那一档）决定它何时被引用 —— 别把一次任务的要求写成全局。'
+      + 'binding=必须 只许配 origin=用户明说（模型自己推测的东西不许记成必须满足的要求）。'
+      + '批次里还是「（待填…」的占位文本会被拒收。同名已存在时拒绝覆盖（vault AGENTS.md §2）。'
+      + '取值口径见 vault 里 ' + PROMPT_DIR + '/创作要求与偏好库.md。',
     parameters: {
       type: 'object',
       properties: {
-        title: { type: 'string', description: '资产名，同时作文件名，如「竖屏悬疑开场·稳运镜」' },
-        prompt: { type: 'string', description: '提示词原文，要能直接复制走' },
-        type: { type: 'string', enum: ['模板', '工作流', '案例', '经验'], description: '默认「模板」' },
-        task: { type: 'string', description: '图生视频 / 文生视频 / 图生图 / 文生图 / 生文案 / 其他' },
-        model: { type: 'string', description: '目标模型**及版本**（不写版本，过几个月这篇就废了）' },
-        engine: { type: 'string', description: '执行 AI 或生图引擎' },
-        aspect: { type: 'string', description: '画幅，如 9:16' },
-        duration: { type: 'string', description: '时长，如 8s；没有就留空' },
-        source: { type: 'string', description: '来源：批次目录或文件路径' },
+        title: { type: 'string', description: '记录名，同时作文件名，如「成片必须竖屏 9:16 且无字幕」' },
+        content: { type: 'string', description: '正文原文：要求的原话 / 偏好的表述 / 案例要点 / 可直接复用的话术' },
+        type: { type: 'string', enum: ASSET_TYPES, description: '默认「要求」' },
+        binding: { type: 'string', enum: ASSET_BINDINGS, description: '约束强度，默认「参考」（最松）' },
+        scope: { type: 'string', description: '适用范围：全局 / 项目：<名字> / 任务：<类型>；不写按「任务」算（最窄）' },
+        origin: { type: 'string', enum: ASSET_ORIGINS, description: '来源，默认「AI推测」；binding=必须 时只能是「用户明说」' },
+        task: { type: 'string', description: '可选。适用任务：图生视频 / 文生视频 / 图生图 / 文生图 / 生文案 / 其他；不适用就留空' },
+        model: { type: 'string', description: '可选。目标模型及版本；不适用就留空' },
+        engine: { type: 'string', description: '可选。执行 AI 或生图引擎；不适用就留空' },
+        aspect: { type: 'string', description: '可选。画幅，如 9:16；不适用就留空' },
+        duration: { type: 'string', description: '可选。时长，如 8s；不适用就留空' },
+        source: { type: 'string', description: '可选。来源：批次目录、文件路径或出处' },
         tags: { type: 'array', items: { type: 'string' }, description: '分类标签（keywords 管检索，这里管分类）' },
         keywords: { type: 'array', items: { type: 'string' }, description: '检索关键词' },
         vault: { type: 'string', description: '可选，vault 绝对路径；不填则走同一把梯子' },
       },
-      required: ['title', 'prompt'],
+      required: ['title', 'content'],
     },
     output: {
       schema: { type: 'string' },
@@ -1342,14 +1375,20 @@ export async function apply(ctx) {
     },
     async execute(args) {
       const title = String((args && args.title) || '').trim()
-      const prompt = String((args && args.prompt) || '').trim()
-      if (title.length === 0) return '没存：title 为空，给一个资产名。'
-      if (prompt.length === 0) return '没存：prompt 为空，把提示词原文放进来。'
-      // 这条是本工具最值钱的判定：批次刚建时 entries[].prompt 就是这句占位文本
-      //（dsh-video-prompt/client.js:1654），把它当成熟提示词收进去等于建了个空壳资产。
-      if (prompt.indexOf(PLACEHOLDER_MARK) >= 0) {
-        return '没存：这段 prompt 还是批次的「（待填…」占位文本，不是成熟提示词。'
-          + '先让它产出真提示词（或从 ' + PROMPT_DIR + ' 之外已有的 optimized-*-prompt.md 取）再收藏。'
+      const content = String((args && args.content) || '').trim()
+      if (title.length === 0) return '没存：title 为空，给一个记录名。'
+      if (content.length === 0) return '没存：content 为空，把要求的原话或正文放进来。'
+      // 批次刚建时 entries[].prompt 就是这句占位文本（dsh-video-prompt/client.js:1654），
+      // 把它当成品收进去等于建了个空壳记录。
+      if (content.indexOf(PLACEHOLDER_MARK) >= 0) {
+        return '没存：这段 content 还是批次的「（待填…」占位文本，不是成品。'
+          + '先让它产出真内容（或从已有的 optimized-*-prompt.md 取）再收录。'
+      }
+      const conflict = bindingConflict(args)
+      if (conflict) {
+        return '没存：binding=必须 只能配 origin=用户明说，而这条写的是 origin=' + conflict.origin + '。'
+          + '推测出来的东西不许记成必须满足的要求 —— 要么降成 binding=优先/参考，'
+          + '要么确认确实是用户明说的、再传 origin=用户明说。'
       }
       const slug = assetSlug(title)
       if (slug.length === 0) return '没存：标题里没有能作文件名的字符（全被非法字符或点号占满了）。'
@@ -1363,7 +1402,7 @@ export async function apply(ctx) {
         return '没存：解析不出 vault 路径 —— 显式参数、' + ENV_VAULT_KEY + '、指针文件、默认值都是空的。'
       }
 
-      const text = buildAssetFile(args, prompt, localDate(new Date()))
+      const text = buildAssetFile(args, content, localDate(new Date()))
       try {
         return await withWriteLock('vault:' + vault, () => withWriteLock(vault + '/' + rel, async () => {
           // browser.create 走 { kind:'createIfAbsent' }：同名并发写只有一次能成，另一次报 EXISTS。
@@ -1374,7 +1413,7 @@ export async function apply(ctx) {
         }))
       } catch (error) {
         if (error && error.code === 'EXISTS') {
-          return '没存：' + rel + ' 已存在。资产优先新建；要改就在笔记页打开它（按属性能筛到）。'
+          return '没存：' + rel + ' 已存在。记录优先新建；要改就在笔记页打开它（按属性能筛到）。'
         }
         const message = (error && error.message) ? error.message : String(error)
         return '没存：' + message
@@ -1384,5 +1423,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.11.0)')
+  console.log('[dsh-note-changes] host up (v1.12.0)')
 }
