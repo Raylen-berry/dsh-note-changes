@@ -1,6 +1,6 @@
 {
   "name": "dsh-note-changes",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "DSH 会话中的 Obsidian 风格笔记插页：目录、搜索、双链、Markdown 编辑与 GitHub 双电脑同步。",
   "keywords": [
     "dsh",
