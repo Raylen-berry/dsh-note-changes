@@ -555,6 +555,67 @@ export function buildContextMessage(text) {
   })
 }
 
+/** 最近一次注入决策的落点（机器本地，不进 git、不进 vault）。 */
+export const CONTEXT_DECISION_REL = POINTER_REL.replace(/[^/]+$/, 'creative-context.json')
+
+/**
+ * 引用闭环开关：读设置文件 frontmatter 里的 `creativeContext`。
+ *
+ * **刻意不走 resolveSettings** —— 那个函数是"设置页表单"的白名单契约，它显式列举每个键，
+ * 往它的返回对象里加键会改掉设置 GET 的响应形状（那个形状被 routes 套件钉死），
+ * 也会让设置界面收到一个它不认识的字段。这里只读这一个键：
+ * 读不到 / 读失败 / 值不是 off，都算"没关"。**每回合现读**，所以关掉当场生效、不用重启。
+ */
+async function creativeContextOff(vault, fsService) {
+  try {
+    const target = await fsService.resolve(vault + '/' + SETTINGS_REL)
+    if (!(await fsService.stat(target))) return false
+    const text = String((await fsService.readText(target)) || '')
+    return String(parseFrontmatter(text).creativeContext || '').trim().toLowerCase() === 'off'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 把「这次自动注入究竟决定了什么」写到 $DSH_HOME 下。
+ *
+ * 为什么非要有这条记录：自动注入是**看不见的** —— 它只是往这一步的消息里塞一段文本，
+ * 没有日志、没有界面；而本机现装的 harness.log **根本不存在**（实测
+ * `%APPDATA%\@deepseek-ai\dsh-desktop\logs` 里只有 crash log，历史那份在 `dsh-desktop\logs`
+ * 且停在 10-07）。没有这条记录，「自动引用到底有没有跑」就只能靠猜，
+ * 而设计文档明确要求把「已核验的宿主调用」和「只是写了代码」分开报。
+ *
+ * 只记**计数与状态**，不记要求正文 —— 诊断信息不该把库内容复制到库外。失败一律忽略。
+ */
+async function recordContextDecision(ctx, info) {
+  try {
+    const fsService = ctx.get('fs')
+    if (!fsService || typeof fsService.writeText !== 'function') return
+    const raw = String(process.env.DSH_HOME || '').replace(/\\/g, '/').replace(/\/+$/, '')
+    if (!/^[A-Za-z]:\/|^\//.test(raw)) return
+    const target = await fsService.resolve(raw + '/' + CONTEXT_DECISION_REL)
+    const payload = {
+      at: new Date().toISOString(),
+      step: info.step,
+      scanned: info.result.coverage.scanned,
+      required: info.result.required.length,
+      preferred: info.result.preferred.length,
+      reference: info.result.reference.length,
+      omitted: info.result.omitted.length,
+      complete: info.result.coverage.complete,
+      injectedChars: info.rendered,
+      injected: info.rendered > 0,
+    }
+    await fsService.writeText(target, JSON.stringify(payload, null, 2) + '\n', undefined, undefined, {
+      mode: 'workspace-write',
+      workspaceRoot: raw,
+    })
+  } catch {
+    // 诊断写不进去绝不影响本回合：这条通道的价值是"有更好"，不是"没有不行"
+  }
+}
+
 /**
  * 资产名 → 文件名。剥掉 Windows 非法字符与路径分隔符（顺带堵住「标题里带 / 就造出子目录」），
  * 再去掉首尾的点与空格 —— notePath() 会拒绝任何以 . 开头的路径段。
@@ -1594,9 +1655,8 @@ export async function apply(ctx) {
       const seed = await resolveVault('', fsService)
       if (seed.vault.length === 0) return decision
 
-      // 开关当场生效（每回合读一次那个小文件）：关自动引用不需要重启宿主
-      const settings = await readSettingsFor(seed.vault, fsService)
-      if (settings && settings.creativeContext === 'off') return decision
+      // 开关当场生效（每回合现读那个小文件）：关自动引用不需要重启宿主
+      if (await creativeContextOff(seed.vault, fsService)) return decision
 
       const scan = await scanAssets(fsService, seed.vault)
       const result = resolveContext(scan.records, {
@@ -1605,6 +1665,8 @@ export async function apply(ctx) {
         now: new Date(),
       })
       const text = renderContext(result)
+      // 先落决策记录再判空：这样「钩子跑了但没东西可注入」与「钩子根本没跑」能分开
+      await recordContextDecision(ctx, { step: payload.step, result, rendered: text.length })
       // 零候选（空库 / 都不适用）⇒ 原样返回，不加一条空消息
       if (text.length === 0) return decision
 

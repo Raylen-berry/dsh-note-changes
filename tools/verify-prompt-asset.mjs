@@ -247,5 +247,89 @@ const dup = await tool.execute({ vault: VAULT, title: T1, content: '换一版写
 ok('同名已存在时拒绝覆盖', /^没存：/.test(dup) && dup.includes('已存在'))
 ok('拒绝时旧文件没被改写', readFileSync(diskPath(REL1), 'utf8').includes('不允许出现字幕'))
 
+// ───────────────────────────────────────────── 6. agent/pre-step：按宿主契约驱动钩子本体
+console.log('\n— 6. agent/pre-step：按 waterfall 契约驱动钩子本体 —')
+const hook = (handlers['agent/pre-step'] || [])[0]
+const baseDecision = () => ({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: '原始用户消息' }] }] })
+/** 按宿主的方式调：先由 next() 给出基础决策，钩子返回的才是真正进入这一步的东西。 */
+const fire = (payload = {}, decision) => {
+  const base = decision === undefined ? baseDecision() : decision
+  return hook(
+    { agent: { id: 's1' }, messages: [], turn: 1, step: 1, signal: { aborted: false }, ...payload },
+    async () => base,
+  )
+}
+const DECISION_FILE = pathMod.join(ROOT, 'home', 'dsh-note-changes', 'creative-context.json')
+
+{
+  const d = await fire()
+  ok('库里有生效的全局必须项时，钩子确实往这一步塞了消息',
+    d.kind === 'enter' && d.messages.length === 2, JSON.stringify(d.messages.length))
+  ok('原始用户消息原样保留，附加的排在它后面',
+    d.messages[0].content[0].text === '原始用户消息', JSON.stringify(d.messages[0].content[0].text))
+  ok('附加消息是一条 user 消息且标了插件来源',
+    d.messages[1].role === 'user' && d.messages[1].source.kind === 'plugin:dsh-note-changes',
+    JSON.stringify(d.messages[1].source.kind))
+  ok('附加内容里有那条要求', String(d.messages[1].content[0].text).includes(T1))
+  ok('附加内容里带优先级规则（本次要求 > 长期记录）',
+    String(d.messages[1].content[0].text).includes('用户本次明确说出的要求优先'))
+  ok('注入的是**一条**消息，不是把整库倒进去',
+    String(d.messages[1].content[0].text).length < 2000, String(d.messages[1].content[0].text).length + ' 字符')
+}
+{
+  const d = await fire({ step: 2 })
+  ok('不是第一步就不碰（step !== 1）', d.messages.length === 1)
+}
+{
+  const rejected = { kind: 'reject' }
+  const d = await fire({}, rejected)
+  ok('基础决策是 reject 时原样返回（不把一步否决改回 enter）', d === rejected)
+}
+{
+  const d = await fire({ signal: { aborted: true } })
+  ok('这一轮已取消时不注入', d.messages.length === 1)
+}
+{
+  const settingsPath = pathMod.join(ROOT, 'vault', '00-索引', '插件设置.md')
+  mkdirSync(pathMod.dirname(settingsPath), { recursive: true })
+  writeFileSync(settingsPath, '---\nvault: ' + JSON.stringify(VAULT) + '\ncreativeContext: off\n---\n\n# 插件设置\n', 'utf8')
+  const d = await fire()
+  ok('设置里 creativeContext: off ⇒ 不注入（关得掉）', d.messages.length === 1)
+  writeFileSync(settingsPath, '---\nvault: ' + JSON.stringify(VAULT) + '\ncreativeContext: auto\n---\n\n# 插件设置\n', 'utf8')
+  const back = await fire()
+  ok('改回 auto 当场恢复（不用重启）', back.messages.length === 2)
+}
+{
+  process.env.DNC_CREATIVE_CONTEXT = 'off'
+  const d = await fire()
+  ok('环境变量 DNC_CREATIVE_CONTEXT=off 也能关', d.messages.length === 1)
+  delete process.env.DNC_CREATIVE_CONTEXT
+}
+{
+  const EMPTY = ROOT.replace(/\\/g, '/') + '/emptyvault'
+  mkdirSync(EMPTY, { recursive: true })
+  process.env.DNC_VAULT = EMPTY
+  const d = await fire()
+  ok('空库时不加空消息（零候选 ⇒ 原样返回）', d.messages.length === 1)
+  delete process.env.DNC_VAULT
+}
+{
+  ok('决策记录落到了机器本地', existsSync(DECISION_FILE), DECISION_FILE)
+  const rec = JSON.parse(readFileSync(DECISION_FILE, 'utf8'))
+  ok('决策记录记的是计数与状态', typeof rec.scanned === 'number' && typeof rec.injected === 'boolean', JSON.stringify(rec))
+  ok('决策记录**不含**要求正文（不把库内容复制到库外）',
+    !JSON.stringify(rec).includes(T1) && !JSON.stringify(rec).includes('不允许出现字幕'))
+}
+{
+  const realGet = ctx.get
+  ctx.get = (n) => { if (n === 'fs') throw new Error('模拟宿主故障'); return realGet(n) }
+  let thrown = null
+  let d = null
+  try { d = await fire() } catch (error) { thrown = error }
+  ctx.get = realGet
+  ok('宿主服务抛异常时不把故障传染给这一回合（返回原决策、不抛）',
+    thrown === null && d && d.messages.length === 1, thrown ? String(thrown.message) : '未抛')
+}
+
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败')
 process.exit(fail ? 1 : 0)

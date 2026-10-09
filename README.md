@@ -31,7 +31,9 @@
 
 `agent/pre-step` 钩子（每回合第一步、`step === 1`）把**适用且生效**的要求附加进上下文，零候选时原样返回、不加空消息，全过程 try/catch——注入失败只记一行日志，绝不影响本回合。自动附加的范围**只到 `global`**：hook 拿不到可信的「当前项目」（不能拿 session id 冒充任务身份），项目级与任务类级请用 `creative_context_resolve` 带上标识解析。
 
-关掉自动引用：在 `00-索引/插件设置.md` 的 frontmatter 写 `creativeContext: off`（当场生效，无需重启），或设环境变量 `DNC_CREATIVE_CONTEXT=off`。关掉后只读工具仍在。
+关掉自动引用：在 `00-索引/插件设置.md` 的 frontmatter 写 `creativeContext: off`（当场生效，无需重启），或设环境变量 `DNC_CREATIVE_CONTEXT=off`。关掉后只读工具仍在。这个键**故意不进设置页的表单白名单**（`resolveSettings`）——它是白名单契约，加键会改掉设置 GET 的响应形状；插件按需单读这一个键，手写的行不会被设置页写回覆盖。
+
+**怎么确认自动引用真的跑了**：每次走到解析那一步，插件会把本次决策写到 `$DSH_HOME/dsh-note-changes/creative-context.json`（机器本地、不进 git），只记计数与状态（扫了几条、required 几条、注入了多少字符、`injected` 真假），**不记要求正文**。加这条通道的原因很实在：现装的 harness.log 根本不存在（`%APPDATA%\@deepseek-ai\dsh-desktop\logs` 里只有 crash log），而自动注入本身没有日志、没有界面——没有它，「钩子跑了但没东西可注入」和「钩子根本没跑」就分不开。写失败一律忽略，不影响本回合。
 
 ## 保存与冲突
 
