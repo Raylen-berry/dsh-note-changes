@@ -259,7 +259,8 @@ const fire = (payload = {}, decision) => {
     async () => base,
   )
 }
-const DECISION_FILE = pathMod.join(ROOT, 'home', 'dsh-note-changes', 'creative-context.json')
+const DECISION_FILE = pathMod.join(os.tmpdir(), 'dsh-note-changes', 'creative-context.json')
+rmSync(DECISION_FILE, { force: true })
 
 {
   const d = await fire()
@@ -319,6 +320,18 @@ const DECISION_FILE = pathMod.join(ROOT, 'home', 'dsh-note-changes', 'creative-c
   ok('决策记录记的是计数与状态', typeof rec.scanned === 'number' && typeof rec.injected === 'boolean', JSON.stringify(rec))
   ok('决策记录**不含**要求正文（不把库内容复制到库外）',
     !JSON.stringify(rec).includes(T1) && !JSON.stringify(rec).includes('不允许出现字幕'))
+}
+{
+  // 模拟真机宿主：DSH_HOME 是 DSH 注给子进程的变量，宿主自己的 process.env 里没有它。
+  // 第一版决策记录裸读 DSH_HOME ⇒ 真机上一条都写不出来（离线测试却全绿，因为 fixture 设了它）。
+  delete process.env.DSH_HOME
+  process.env.DNC_VAULT = VAULT // 梯子改走 env 档，别落到真实 E:/vault
+  const before = existsSync(DECISION_FILE) ? readFileSync(DECISION_FILE, 'utf8') : ''
+  await fire()
+  const after = existsSync(DECISION_FILE) ? readFileSync(DECISION_FILE, 'utf8') : ''
+  ok('宿主进程里 DSH_HOME 为空时，决策记录照样写（落点 tmpdir，不依赖 env）',
+    after.length > 0 && after !== before, 'at=' + ((JSON.parse(after || '{}') || {}).at || ''))
+  delete process.env.DNC_VAULT
 }
 {
   const realGet = ctx.get

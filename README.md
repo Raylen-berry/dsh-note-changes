@@ -33,7 +33,9 @@
 
 关掉自动引用：在 `00-索引/插件设置.md` 的 frontmatter 写 `creativeContext: off`（当场生效，无需重启），或设环境变量 `DNC_CREATIVE_CONTEXT=off`。关掉后只读工具仍在。这个键**故意不进设置页的表单白名单**（`resolveSettings`）——它是白名单契约，加键会改掉设置 GET 的响应形状；插件按需单读这一个键，手写的行不会被设置页写回覆盖。
 
-**怎么确认自动引用真的跑了**：每次走到解析那一步，插件会把本次决策写到 `$DSH_HOME/dsh-note-changes/creative-context.json`（机器本地、不进 git），只记计数与状态（扫了几条、required 几条、注入了多少字符、`injected` 真假），**不记要求正文**。加这条通道的原因很实在：现装的 harness.log 根本不存在（`%APPDATA%\@deepseek-ai\dsh-desktop\logs` 里只有 crash log），而自动注入本身没有日志、没有界面——没有它，「钩子跑了但没东西可注入」和「钩子根本没跑」就分不开。写失败一律忽略，不影响本回合。
+**怎么确认自动引用真的跑了**：每次走到解析那一步，插件会把本次决策写到 `%TEMP%\dsh-note-changes\creative-context.json`（机器本地、易失、不进 git），只记计数与状态（扫了几条、required 几条、注入了多少字符、`injected` 真假），**不记要求正文**。加这条通道的原因很实在：现装的 harness.log 根本不存在（`%APPDATA%\@deepseek-ai\dsh-desktop\logs` 里只有 crash log），而自动注入本身没有日志、没有界面——没有它，「钩子跑了但没东西可注入」和「钩子根本没跑」就分不开。写失败一律忽略，不影响本回合。
+
+落点用 `os.tmpdir()` 而不是 `$DSH_HOME`，是踩过坑后的选择：**宿主进程自己的 `process.env.DSH_HOME` 是空的**（那是 DSH 注入给子进程的变量），`guessDshHome` 的兜底又指向废弃那套 `%APPDATA%\dsh-desktop\harness`——第一版裸读 `DSH_HOME` 的实现在真机上一条记录都写不出来，离线测试却全绿（fixture 设了这个变量）。诊断类落点要选**无条件可达**的位置，并直写 node:fs（同 `readPointerValue` 的先例），别走需要定位 home 的路径。
 
 ## 保存与冲突
 

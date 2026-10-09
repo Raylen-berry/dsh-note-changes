@@ -16,7 +16,8 @@
 //   修法：git config --global --add safe.directory <vault 路径>
 // ============================================================================
 
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { createVaultBrowser, notePath } from './lib/vault-browser.mjs'
 import { runShell } from './lib/shell-compat.mjs'
@@ -555,8 +556,8 @@ export function buildContextMessage(text) {
   })
 }
 
-/** 最近一次注入决策的落点（机器本地，不进 git、不进 vault）。 */
-export const CONTEXT_DECISION_REL = POINTER_REL.replace(/[^/]+$/, 'creative-context.json')
+/** 最近一次注入决策的落点（`os.tmpdir()` 下，机器本地、易失、不进 git、不进 vault）。 */
+export const CONTEXT_DECISION_REL = 'dsh-note-changes/creative-context.json'
 
 /**
  * 引用闭环开关：读设置文件 frontmatter 里的 `creativeContext`。
@@ -578,7 +579,7 @@ async function creativeContextOff(vault, fsService) {
 }
 
 /**
- * 把「这次自动注入究竟决定了什么」写到 $DSH_HOME 下。
+ * 把「这次自动注入究竟决定了什么」写到临时目录（readPointerValue 的同款直写方式）。
  *
  * 为什么非要有这条记录：自动注入是**看不见的** —— 它只是往这一步的消息里塞一段文本，
  * 没有日志、没有界面；而本机现装的 harness.log **根本不存在**（实测
@@ -586,15 +587,18 @@ async function creativeContextOff(vault, fsService) {
  * 且停在 10-07）。没有这条记录，「自动引用到底有没有跑」就只能靠猜，
  * 而设计文档明确要求把「已核验的宿主调用」和「只是写了代码」分开报。
  *
+ * 落点为什么是 `os.tmpdir()` 而不是 `$DSH_HOME`（第一版就这么写，真机上静默失效）：
+ * **宿主进程自己的 `process.env.DSH_HOME` 是空的** —— 那是 DSH 注入给子进程的变量，
+ * 宿主自己不给自己设；`guessDshHome` 的兜底又指向废弃那套 `%APPDATA%\dsh-desktop\harness`。
+ * 拿不到 home ⇒ 路径判空 ⇒ 直接 return，一条记录都写不出来，还被 try/catch 吞得无声无息。
+ * `tmpdir()` 永远可达，诊断数据也本就允许易失。直写 node:fs 的理由同 readPointerValue。
+ *
  * 只记**计数与状态**，不记要求正文 —— 诊断信息不该把库内容复制到库外。失败一律忽略。
  */
-async function recordContextDecision(ctx, info) {
+function recordContextDecision(info) {
   try {
-    const fsService = ctx.get('fs')
-    if (!fsService || typeof fsService.writeText !== 'function') return
-    const raw = String(process.env.DSH_HOME || '').replace(/\\/g, '/').replace(/\/+$/, '')
-    if (!/^[A-Za-z]:\/|^\//.test(raw)) return
-    const target = await fsService.resolve(raw + '/' + CONTEXT_DECISION_REL)
+    const dir = String(tmpdir()).replace(/\\/g, '/') + '/' + CONTEXT_DECISION_REL.replace(/\/[^/]+$/, '')
+    mkdirSync(dir, { recursive: true })
     const payload = {
       at: new Date().toISOString(),
       step: info.step,
@@ -607,10 +611,7 @@ async function recordContextDecision(ctx, info) {
       injectedChars: info.rendered,
       injected: info.rendered > 0,
     }
-    await fsService.writeText(target, JSON.stringify(payload, null, 2) + '\n', undefined, undefined, {
-      mode: 'workspace-write',
-      workspaceRoot: raw,
-    })
+    writeFileSync(dir + '/creative-context.json', JSON.stringify(payload, null, 2) + '\n', 'utf8')
   } catch {
     // 诊断写不进去绝不影响本回合：这条通道的价值是"有更好"，不是"没有不行"
   }
@@ -1666,7 +1667,7 @@ export async function apply(ctx) {
       })
       const text = renderContext(result)
       // 先落决策记录再判空：这样「钩子跑了但没东西可注入」与「钩子根本没跑」能分开
-      await recordContextDecision(ctx, { step: payload.step, result, rendered: text.length })
+      recordContextDecision({ step: payload.step, result, rendered: text.length })
       // 零候选（空库 / 都不适用）⇒ 原样返回，不加一条空消息
       if (text.length === 0) return decision
 
