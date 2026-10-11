@@ -251,11 +251,17 @@ ok('拒绝时旧文件没被改写', readFileSync(diskPath(REL1), 'utf8').includ
 console.log('\n— 6. agent/pre-step：按 waterfall 契约驱动钩子本体 —')
 const hook = (handlers['agent/pre-step'] || [])[0]
 const baseDecision = () => ({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: '原始用户消息' }] }] })
-/** 按宿主的方式调：先由 next() 给出基础决策，钩子返回的才是真正进入这一步的东西。 */
+/**
+ * 按宿主的方式调：先由 next() 给出基础决策，钩子返回的才是真正进入这一步的东西。
+ * **默认每次用全新会话 id** —— 去重是按会话记的，复用同一个 id 会让「本该注入」的断言
+ * 因为「上一轮已注入过」而假通过/假失败（踩过一次：「改回 auto 当场恢复」就是这么挂的）。
+ * 要测去重本身时显式传 `{ agent: { id: … } }`。
+ */
+let sidSeq = 0
 const fire = (payload = {}, decision) => {
   const base = decision === undefined ? baseDecision() : decision
   return hook(
-    { agent: { id: 's1' }, messages: [], turn: 1, step: 1, signal: { aborted: false }, ...payload },
+    { agent: { id: 's' + (++sidSeq) }, messages: [], turn: 1, step: 1, signal: { aborted: false }, ...payload },
     async () => base,
   )
 }
@@ -347,24 +353,34 @@ rmSync(DECISION_FILE, { force: true })
     thrown === null && d && d.messages.length === 1, thrown ? String(thrown.message) : '未抛')
 }
 {
-  // 去重：历史里那份注入块还在（真机已验证），照原样再塞一份纯属白烧 token
-  const first = await fire()
-  ok('首次注入会追加一条消息', first.messages.length === 2, String(first.messages.length))
-  const again = await fire({}, { kind: 'enter', messages: first.messages.slice() })
-  ok('历史里已有**同样**的块 ⇒ 不再重复注入', again.messages.length === 2, String(again.messages.length))
-  const changed = await fire({}, {
-    kind: 'enter',
-    messages: [
-      first.messages[0],
-      { role: 'user', content: [{ type: 'text', text: '【必须满足】旧的、已被替换的内容' }], source: { kind: 'plugin:dsh-note-changes' } },
-    ],
-  })
-  ok('历史里的块内容变了 ⇒ 追加新的一份（最新那份是当前结论）', changed.messages.length === 3, String(changed.messages.length))
-  ok('lastInjectedText 取的是最后一份插件块',
-    mod.lastInjectedText({ messages: [{ role: 'user', content: [{ type: 'text', text: '别人的话' }] }, first.messages[1]] }).includes('【必须满足】'))
+  // 去重按**会话**记（v1.13.2）。v1.13.1 试过比对 decision.messages 里的历史块，
+  // 真机证明那形状靠不住（第二轮照样又追加了一份），所以断言也改成按会话驱动。
+  const sameSession = { agent: { id: 'session-dedupe' } }
+  const a = await fire(sameSession)
+  ok('新会话首次 ⇒ 追加一条', a.messages.length === 2, String(a.messages.length))
+  const b = await fire(sameSession)
+  ok('同会话、内容没变 ⇒ 不再追加（这就是去重）', b.messages.length === 1, String(b.messages.length))
+  const c = await fire({ agent: { id: 'session-other' } })
+  ok('另一个会话 ⇒ 各注入一次（不跨会话互相压制）', c.messages.length === 2, String(c.messages.length))
+
+  const extra = diskPath(ASSET_DIR + '/去重-内容变化.md')
+  writeFileSync(extra, mod.buildAssetFile({
+    title: '去重-内容变化', type: '要求', binding: '必须', origin: '用户明说',
+    source_ref: '测试用锚点', scope_kind: 'global',
+  }, '库里新增的一条要求。', '2026-10-11'), 'utf8')
+  const d = await fire(sameSession)
+  ok('同会话但适用内容变了 ⇒ 追加新的一份（最新那份是当前结论）', d.messages.length === 2, String(d.messages.length))
+  rmSync(extra, { force: true })
+
+  ok('lastInjectedText 取的是最后一份插件块（现在只用于诊断）',
+    mod.lastInjectedText({ messages: [{ role: 'user', content: [{ type: 'text', text: '别人的话' }] }, a.messages[1]] }).includes('【必须满足】'))
   ok('没有注入过时 lastInjectedText 给空串',
     mod.lastInjectedText({ messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }] }) === '')
   ok('lastInjectedText 对 null 不炸', mod.lastInjectedText(null) === '')
+
+  const rec = JSON.parse(readFileSync(DECISION_FILE, 'utf8'))
+  ok('决策记录带上 messages 形状的诊断字段（用来解释 v1.13.1 为什么失效）',
+    typeof rec.messagesLen === 'number' && typeof rec.hadPluginBlock === 'boolean', JSON.stringify(rec))
 }
 
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败')

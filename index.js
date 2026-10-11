@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.13.1)
+// dsh-note-changes · Host half (v1.13.2)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -557,9 +557,12 @@ export function buildContextMessage(text) {
 }
 
 /**
- * 取**最后一份**本插件注入块的正文；没有就空串。
- * 用于「内容没变就不重复注入」的比对——判据是历史里那份还在（真机已验证），
- * 所以每回合照原样再塞一份纯属浪费。
+ * 取最后一份本插件注入块的正文；没有就空串。
+ *
+ * **只用于诊断**（决策记录里的 `hadPluginBlock`），不再用它判去重 ——
+ * 真机实测：`decision.messages` 里拿不到上一轮注入的那份（第二轮仍然 `repeated:false / injected:true`），
+ * 原因要么是它只装「本步新增的消息」、要么宿主把 `source` 剥掉了。
+ * 留着它是为了让下次重启后能从决策记录里看出到底是哪一种。
  */
 export function lastInjectedText(decision) {
   const msgs = decision && Array.isArray(decision.messages) ? decision.messages : []
@@ -573,6 +576,15 @@ export function lastInjectedText(decision) {
   }
   return ''
 }
+
+/**
+ * 已注入过的内容，按会话记（键 = `agent.id`，即 SessionId）。
+ * 去重**不再**依赖 `decision.messages` 的形状（那条路真机证明走不通，见 lastInjectedText 的注释）。
+ * 内存态、重启清空 ⇒ 重启后每个会话会补注入一份，之后内容不变就跳过；
+ * 内容变了（要求新增 / 失效 / 到期 / 换范围）会追加新的一份——旧的那份留在历史里，
+ * 最新那份即当前结论。
+ */
+const injectedBySession = new Map()
 
 /** 最近一次注入决策的落点（`os.tmpdir()` 下，机器本地、易失、不进 git、不进 vault）。 */
 export const CONTEXT_DECISION_REL = 'dsh-note-changes/creative-context.json'
@@ -630,6 +642,10 @@ function recordContextDecision(info) {
       // 三种情况分开记，否则「跑了但没东西」「跑了但已有跳过」「真注入了」会糊成一个 false
       repeated: info.repeated === true,
       injected: info.rendered > 0 && info.repeated !== true,
+      // 诊断 decision.messages 的形状：只装本步新增（messagesLen 小、hadPluginBlock 恒 false）
+      // 还是含完整历史（两者都随会话增长）。用来解释去重为什么在 v1.13.1 失效。
+      messagesLen: info.messagesLen,
+      hadPluginBlock: info.hadPluginBlock === true,
     }
     writeFileSync(dir + '/creative-context.json', JSON.stringify(payload, null, 2) + '\n', 'utf8')
   } catch {
@@ -1686,18 +1702,27 @@ export async function apply(ctx) {
         now: new Date(),
       })
       const text = renderContext(result)
-      // 内容与上一份注入块**完全相同**就不再注入（v1.13.1）。
-      // 为什么可以这样判：`decision.messages` 是「进入这一步的消息」= 本轮完整的消息序列，
-      // 历史里那份注入块就在里面（真机已验证：上一轮注入的块下一轮仍出现在模型上下文）。
-      // 重复注入同一段文字只是白烧 token，还把注意力反复拉回同一处。
-      // 内容变了（要求新增 / 失效 / 到期 / 换范围）才追加新的一份——旧的那份留在历史里，
-      // 但最新那份是当前结论。
-      const repeated = text.length > 0 && lastInjectedText(decision) === text
+      // 内容与**本会话上次注入的**完全相同就不再注入（v1.13.2）。
+      // v1.13.1 曾试图比对 `decision.messages` 里的历史块：那条路真机证明走不通 ——
+      // 误以为「模型上下文里能看到上一轮的块」就等于「decision.messages 里有它」，
+      // 两者是不同的东西（宿主可以把历史拼进 prompt，却不在 pre-step 的 messages 里给）。
+      // 现在按会话记上次注入的内容：内容不变就跳过，变了才追加新的一份。
+      const sid = payload.agent && payload.agent.id ? String(payload.agent.id) : ''
+      const repeated = text.length > 0 && sid.length > 0 && injectedBySession.get(sid) === text
       // 先落决策记录再判空：这样「钩子跑了但没东西可注入」与「钩子根本没跑」能分开
-      recordContextDecision({ step: payload.step, result, rendered: text.length, repeated })
+      recordContextDecision({
+        step: payload.step,
+        result,
+        rendered: text.length,
+        repeated,
+        // 诊断：messages 的形状到底是哪一种（只装本步新增 / 含完整历史且保留 source）
+        messagesLen: Array.isArray(decision.messages) ? decision.messages.length : -1,
+        hadPluginBlock: lastInjectedText(decision).length > 0,
+      })
       // 零候选（空库 / 都不适用）⇒ 原样返回，不加一条空消息
       if (text.length === 0) return decision
       if (repeated) return decision
+      if (sid.length > 0) injectedBySession.set(sid, text)
 
       return { kind: 'enter', messages: [...decision.messages, buildContextMessage(text)] }
     } catch (error) {
@@ -1709,5 +1734,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.13.1)')
+  console.log('[dsh-note-changes] host up (v1.13.2)')
 }
