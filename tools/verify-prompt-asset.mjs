@@ -332,6 +332,9 @@ rmSync(DECISION_FILE, { force: true })
   ok('宿主进程里 DSH_HOME 为空时，决策记录照样写（落点 tmpdir，不依赖 env）',
     after.length > 0 && after !== before, 'at=' + ((JSON.parse(after || '{}') || {}).at || ''))
   delete process.env.DNC_VAULT
+  // 必须恢复：DSH_HOME 缺失 + 指针文件不可达时，梯子会落到 DEFAULT_VAULT（硬编码的真实库），
+  // 后面所有用例都会去扫真实 vault 而不是 fixture —— 就这么污染过一次。
+  process.env.DSH_HOME = HOME.replace(/\\/g, '/')
 }
 {
   const realGet = ctx.get
@@ -342,6 +345,26 @@ rmSync(DECISION_FILE, { force: true })
   ctx.get = realGet
   ok('宿主服务抛异常时不把故障传染给这一回合（返回原决策、不抛）',
     thrown === null && d && d.messages.length === 1, thrown ? String(thrown.message) : '未抛')
+}
+{
+  // 去重：历史里那份注入块还在（真机已验证），照原样再塞一份纯属白烧 token
+  const first = await fire()
+  ok('首次注入会追加一条消息', first.messages.length === 2, String(first.messages.length))
+  const again = await fire({}, { kind: 'enter', messages: first.messages.slice() })
+  ok('历史里已有**同样**的块 ⇒ 不再重复注入', again.messages.length === 2, String(again.messages.length))
+  const changed = await fire({}, {
+    kind: 'enter',
+    messages: [
+      first.messages[0],
+      { role: 'user', content: [{ type: 'text', text: '【必须满足】旧的、已被替换的内容' }], source: { kind: 'plugin:dsh-note-changes' } },
+    ],
+  })
+  ok('历史里的块内容变了 ⇒ 追加新的一份（最新那份是当前结论）', changed.messages.length === 3, String(changed.messages.length))
+  ok('lastInjectedText 取的是最后一份插件块',
+    mod.lastInjectedText({ messages: [{ role: 'user', content: [{ type: 'text', text: '别人的话' }] }, first.messages[1]] }).includes('【必须满足】'))
+  ok('没有注入过时 lastInjectedText 给空串',
+    mod.lastInjectedText({ messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }] }) === '')
+  ok('lastInjectedText 对 null 不炸', mod.lastInjectedText(null) === '')
 }
 
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败')

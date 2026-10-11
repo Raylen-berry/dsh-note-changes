@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.13.0)
+// dsh-note-changes · Host half (v1.13.1)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -492,7 +492,7 @@ export const ASSET_ORIGINS = ['用户明说', '参考案例', 'AI推测']
 export const DEFAULT_SCOPE_KIND = 'task_instance'
 
 /**
- * 写入前的硬校验。v1.13.0 只有第一条，v1.13.0 按设计文档 §3 表格补了后两条：
+ * 写入前的硬校验。v1.12.0 只有第一条，v1.13.0 按设计文档 §3 表格补了后两条：
  *   1. binding=必须 只能配 origin=用户明说（推测不许变成必须满足的要求）
  *   2. origin=用户明说 必须带 source_ref（用户原话/文件在哪）——
  *      **光有模型声明不构成来源证明**，这是 §3 表格第 3 行点名的缺口
@@ -556,6 +556,24 @@ export function buildContextMessage(text) {
   })
 }
 
+/**
+ * 取**最后一份**本插件注入块的正文；没有就空串。
+ * 用于「内容没变就不重复注入」的比对——判据是历史里那份还在（真机已验证），
+ * 所以每回合照原样再塞一份纯属浪费。
+ */
+export function lastInjectedText(decision) {
+  const msgs = decision && Array.isArray(decision.messages) ? decision.messages : []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (!m || !m.source || m.source.kind !== 'plugin:dsh-note-changes') continue
+    return (Array.isArray(m.content) ? m.content : [])
+      .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text)
+      .join('\n')
+  }
+  return ''
+}
+
 /** 最近一次注入决策的落点（`os.tmpdir()` 下，机器本地、易失、不进 git、不进 vault）。 */
 export const CONTEXT_DECISION_REL = 'dsh-note-changes/creative-context.json'
 
@@ -609,7 +627,9 @@ function recordContextDecision(info) {
       omitted: info.result.omitted.length,
       complete: info.result.coverage.complete,
       injectedChars: info.rendered,
-      injected: info.rendered > 0,
+      // 三种情况分开记，否则「跑了但没东西」「跑了但已有跳过」「真注入了」会糊成一个 false
+      repeated: info.repeated === true,
+      injected: info.rendered > 0 && info.repeated !== true,
     }
     writeFileSync(dir + '/creative-context.json', JSON.stringify(payload, null, 2) + '\n', 'utf8')
   } catch {
@@ -1666,10 +1686,18 @@ export async function apply(ctx) {
         now: new Date(),
       })
       const text = renderContext(result)
+      // 内容与上一份注入块**完全相同**就不再注入（v1.13.1）。
+      // 为什么可以这样判：`decision.messages` 是「进入这一步的消息」= 本轮完整的消息序列，
+      // 历史里那份注入块就在里面（真机已验证：上一轮注入的块下一轮仍出现在模型上下文）。
+      // 重复注入同一段文字只是白烧 token，还把注意力反复拉回同一处。
+      // 内容变了（要求新增 / 失效 / 到期 / 换范围）才追加新的一份——旧的那份留在历史里，
+      // 但最新那份是当前结论。
+      const repeated = text.length > 0 && lastInjectedText(decision) === text
       // 先落决策记录再判空：这样「钩子跑了但没东西可注入」与「钩子根本没跑」能分开
-      recordContextDecision({ step: payload.step, result, rendered: text.length })
+      recordContextDecision({ step: payload.step, result, rendered: text.length, repeated })
       // 零候选（空库 / 都不适用）⇒ 原样返回，不加一条空消息
       if (text.length === 0) return decision
+      if (repeated) return decision
 
       return { kind: 'enter', messages: [...decision.messages, buildContextMessage(text)] }
     } catch (error) {
@@ -1681,5 +1709,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.13.0)')
+  console.log('[dsh-note-changes] host up (v1.13.1)')
 }
