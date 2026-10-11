@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.13.4)
+// dsh-note-changes · Host half (v1.13.5)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -1639,7 +1639,9 @@ export async function apply(ctx) {
       type: 'object',
       properties: {
         project: { type: 'string', description: '当前项目标识，须与记录的 scope_id 完全一致；不给则项目级记录不生效（会列进 omitted）' },
-        task_type: { type: 'string', description: '当前任务类别，须与记录的 scope_id 完全一致；不给则任务类级记录不生效' },
+        task_type: { type: 'string', description: '当前**任务类别**标识，用于判断记录该不该生效（比记录的 scope_id）；不给则任务类级记录不生效' },
+        task: { type: 'string', description: '当前**生成方式**（图生视频 / 文生视频 / 图生图 / 文生图 / 生文案 / 其他），只用于挑参考资料：与记录 task 字段不同的案例会被排除并注明 task-mismatch' },
+        aspect: { type: 'string', description: '当前画幅（如 9:16），同样只用于挑参考资料：与记录 aspect 不同的会被排除并注明 aspect-mismatch' },
         explicit: { type: 'array', items: { type: 'string' }, description: '本次显式选用的记录（id / 标题 / 路径三者任一）。task_instance 与草稿只有被显式选用才生效' },
         reference_budget: { type: 'number', description: '参考资料最多几条，默认 3；必须项不受此预算裁剪' },
         vault: { type: 'string', description: '可选，vault 绝对路径；不填则走同一把梯子' },
@@ -1660,6 +1662,8 @@ export async function apply(ctx) {
       const result = resolveContext(scan.records, {
         project: a.project,
         taskType: a.task_type,
+        task: a.task,
+        aspect: a.aspect,
         explicit: Array.isArray(a.explicit) ? a.explicit : [],
         referenceBudget: Number(a.reference_budget),
         complete: scan.complete,
@@ -1744,5 +1748,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.13.4)')
+  console.log('[dsh-note-changes] host up (v1.13.5)')
 }

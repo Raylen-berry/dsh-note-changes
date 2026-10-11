@@ -238,5 +238,32 @@ console.log('\n— 8. 扫描：目录不存在 ≠ 失败，读不动要如实�
     String(M.renderContext(M.resolveContext(r1.records, {})).length))
 }
 
+// ───────────────────────────────────────────── 9. 参考资料按适用场景筛（v1.13.5）
+console.log('\n— 9. 参考案例：按任务类型与画幅挑 —')
+{
+  const caseVideo = rec('cv', '竖屏图生视频案例', { id: 'cv1', type: '参考', origin: '参考案例', scope_kind: 'global', task: '图生视频', aspect: '9:16' })
+  const caseCopy = rec('cc', '生文案案例', { id: 'cc1', type: '参考', origin: '参考案例', scope_kind: 'global', task: '生文案' })
+  const caseNoScene = rec('cn', '没写场景的案例', { id: 'cn1', type: '参考', origin: '参考案例', scope_kind: 'global' })
+  const mustVideo = rec('mv', '竖屏要求', { id: 'mv1', type: '要求', binding: '必须', origin: '用户明说', scope_kind: 'global', task: '图生视频' })
+
+  const r = M.resolveContext([caseVideo, caseCopy, caseNoScene, mustVideo], { task: '图生视频', aspect: '9:16' })
+  ok('场景匹配的案例保留', titles(r.reference).includes('竖屏图生视频案例'), titles(r.reference).join(','))
+  ok('任务类型不符的案例被排除', !titles(r.reference).includes('生文案案例'))
+  ok('排除给出可见原因（task-mismatch）', reasons(r, 'cc1') === 'task-mismatch', reasons(r, 'cc1'))
+  ok('记录没写场景 ⇒ 不筛，照旧保留（不误伤旧记录）', titles(r.reference).includes('没写场景的案例'))
+  ok('**必须项不受场景筛选影响**（要求不因为换了任务类型就失效）',
+    titles(r.required).includes('竖屏要求'), titles(r.required).join(','))
+
+  ok('画幅不符被排除并给原因（aspect-mismatch）',
+    reasons(M.resolveContext([caseVideo], { aspect: '16:9' }), 'cv1') === 'aspect-mismatch',
+    reasons(M.resolveContext([caseVideo], { aspect: '16:9' }), 'cv1'))
+  ok('调用方没给场景 ⇒ 什么都不筛（宁可多给一条）',
+    titles(M.resolveContext([caseVideo, caseCopy], {}).reference).length === 2,
+    titles(M.resolveContext([caseVideo, caseCopy], {}).reference).join(','))
+  ok('shape 带上适用场景，agent 才判断得了「是不是同一类活」',
+    (r.reference.find((x) => x.id === 'cv1') || {}).task === '图生视频'
+    && (r.reference.find((x) => x.id === 'cv1') || {}).aspect === '9:16')
+}
+
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败')
 process.exit(fail ? 1 : 0)
