@@ -265,7 +265,11 @@ const fire = (payload = {}, decision) => {
     async () => base,
   )
 }
-const DECISION_FILE = pathMod.join(os.tmpdir(), 'dsh-note-changes', 'creative-context.json')
+// 诊断落点必须隔离，否则本套件里的钩子调用会覆盖**真机**那份决策记录
+// （踩过：核对真机行为时读到的却是测试结果 —— `scanned:3 / required:2`，而真实库只有 2 篇、0 条生效）。
+const DECISION_DIR = pathMod.join(ROOT, 'decision')
+process.env.DNC_CONTEXT_DECISION_DIR = DECISION_DIR.replace(/\\/g, '/')
+const DECISION_FILE = pathMod.join(DECISION_DIR, 'creative-context.json')
 rmSync(DECISION_FILE, { force: true })
 
 {
@@ -381,6 +385,11 @@ rmSync(DECISION_FILE, { force: true })
   const rec = JSON.parse(readFileSync(DECISION_FILE, 'utf8'))
   ok('决策记录带上 messages 形状的诊断字段（用来解释 v1.13.1 为什么失效）',
     typeof rec.messagesLen === 'number' && typeof rec.hadPluginBlock === 'boolean', JSON.stringify(rec))
+  ok('决策记录标明是**哪个会话**写的（多会话共用这一个文件）',
+    typeof rec.session === 'string' && rec.session.length > 0, rec.session)
+  ok('离线套件的诊断没有写到真机那份（落点被 DNC_CONTEXT_DECISION_DIR 隔离）',
+    DECISION_FILE.includes('decision') && !DECISION_FILE.includes('dsh-note-changes\\creative-context.json'),
+    DECISION_FILE)
 }
 
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败')

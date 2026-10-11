@@ -1,5 +1,5 @@
 // ============================================================================
-// dsh-note-changes · Host half (v1.13.2)
+// dsh-note-changes · Host half (v1.13.3)
 // ============================================================================
 // 只读地读取一个 Obsidian vault 的 git 历史，返回「每次提交改动了哪些 .md」。
 //
@@ -627,10 +627,19 @@ async function creativeContextOff(vault, fsService) {
  */
 function recordContextDecision(info) {
   try {
-    const dir = String(tmpdir()).replace(/\\/g, '/') + '/' + CONTEXT_DECISION_REL.replace(/\/[^/]+$/, '')
+    // 落点可用 `DNC_CONTEXT_DECISION_DIR` 覆盖 —— **离线套件必须用它隔离**。
+    // 踩过：套件里的钩子调用和真机写同一个 tmpdir 文件，于是"读决策记录核对真机行为"时
+    // 读到的是测试结果（`scanned:3 / required:2`，而真实库只有 2 篇、0 条生效），误当证据。
+    // 这个文件本身就是多写入者共用的（每个会话的钩子都可能写下最后一条）。
+    const override = String(process.env.DNC_CONTEXT_DECISION_DIR || '').trim()
+    const dir = override.length > 0
+      ? override.replace(/\\/g, '/').replace(/\/+$/, '')
+      : String(tmpdir()).replace(/\\/g, '/') + '/' + CONTEXT_DECISION_REL.replace(/\/[^/]+$/, '')
     mkdirSync(dir, { recursive: true })
     const payload = {
       at: new Date().toISOString(),
+      // 谁写的：多会话共用这一个文件，没有它分不清是哪个会话的钩子写下了最后一条
+      session: String(info.session || ''),
       step: info.step,
       scanned: info.result.coverage.scanned,
       required: info.result.required.length,
@@ -1715,6 +1724,7 @@ export async function apply(ctx) {
         result,
         rendered: text.length,
         repeated,
+        session: sid,
         // 诊断：messages 的形状到底是哪一种（只装本步新增 / 含完整历史且保留 source）
         messagesLen: Array.isArray(decision.messages) ? decision.messages.length : -1,
         hadPluginBlock: lastInjectedText(decision).length > 0,
@@ -1734,5 +1744,5 @@ export async function apply(ctx) {
 
   // 版本号是写死的字面量 —— 与 package.json 的一致性由 tools/verify-append-lock.mjs 的
   // 「日志版本号 == package.json version」断言守着（这里曾长期停在 v1.5.0，把日志变成误导源）。
-  console.log('[dsh-note-changes] host up (v1.13.2)')
+  console.log('[dsh-note-changes] host up (v1.13.3)')
 }
