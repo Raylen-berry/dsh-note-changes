@@ -219,6 +219,24 @@ console.log('\n— 8. 扫描：目录不存在 ≠ 失败，读不动要如实�
   ok('扫描 → 解析端到端：只留当前项目的必须项',
     titles(r.required).length === 1 && titles(r.required)[0] === '扫出来的必须项', titles(r.required).join(','))
 }
+{
+  // 注入去重靠比对两次渲染出的文本，所以扫描顺序必须与 readdir 给的顺序无关
+  const files = {
+    'b.md': md('乙', { id: 'b1', type: '要求', binding: '必须', origin: '用户明说', scope_kind: 'global' }),
+    'c.md': md('丙', { id: 'c1', type: '要求', binding: '必须', origin: '用户明说', scope_kind: 'global' }),
+    'a.md': md('甲', { id: 'a1', type: '要求', binding: '必须', origin: '用户明说', scope_kind: 'global' }),
+  }
+  const shuffled = { resolve: async (p) => p, listDir: async () => [{ name: 'b.md' }, { name: 'c.md' }, { name: 'a.md' }], readText: async (p) => files[String(p).split('/').pop()] }
+  const sortedList = { resolve: async (p) => p, listDir: async () => [{ name: 'a.md' }, { name: 'b.md' }, { name: 'c.md' }], readText: async (p) => files[String(p).split('/').pop()] }
+  const r1 = await M.scanAssets(shuffled, 'E:/vault')
+  const r2 = await M.scanAssets(sortedList, 'E:/vault')
+  ok('扫描结果按文件名排序（与 readdir 顺序无关）',
+    r1.records.map((x) => x.path).join(',') === '40-提示词/a.md,40-提示词/b.md,40-提示词/c.md',
+    r1.records.map((x) => x.path).join(','))
+  ok('两种 readdir 顺序渲染出**完全相同**的文本（去重才比对得上）',
+    M.renderContext(M.resolveContext(r1.records, {})) === M.renderContext(M.resolveContext(r2.records, {})),
+    String(M.renderContext(M.resolveContext(r1.records, {})).length))
+}
 
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败')
 process.exit(fail ? 1 : 0)

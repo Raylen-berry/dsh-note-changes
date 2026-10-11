@@ -1245,7 +1245,7 @@ function apply(ctx) {
       },
     ),
   )
-  console.log('[dsh-note-changes] client up (v1.13.3)')
+  console.log('[dsh-note-changes] client up (v1.13.4)')
 }
 exports.name = 'dsh-note-changes'
 exports.inject = ['slots']
